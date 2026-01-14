@@ -1,0 +1,27 @@
+# AWS SDK
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Authentication & Security
+PyJWT>=2.8.0
+bcrypt>=4.1.2
+cryptography>=42.0.0
+
+# Web3 for wallet signature verification
+web3>=6.15.0
+eth-account>=0.11.0
+
+# Email (optional - uncomment if using SendGrid)
+# sendgrid>=6.11.0
+
+# Utilities
+python-dateutil>=2.8.2
+pytz>=2024.1
+
+# Development dependencies (not needed in Lambda deployment)
+# pytest>=8.0.0
+# pytest-cov>=4.1.0
+# pytest-mock>=3.12.0
+# black>=24.1.0
+# flake8>=7.0.0
+# mypy>=1.8.0

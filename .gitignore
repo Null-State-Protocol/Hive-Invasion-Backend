@@ -1,0 +1,87 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# Lambda deployment
+function.zip
+*.zip
+
+# Environment variables
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# AWS
+.aws/
+
+# Installed packages (Lambda layers/dependencies)
+# These should NOT be in git - Lambda uses layers or zip deployment
+boto3/
+botocore/
+web3/
+eth_*/
+jwt/
+bcrypt/
+requests/
+urllib3/
+s3transfer/
+jmespath/
+certifi/
+charset_normalizer/
+idna/
+dateutil/
+pytz/
+Crypto/
+pycryptodome/
+pydantic/
+pydantic_core/
+annotated_types/
+typing_extensions/
+typing_inspection/
+aiohappyeyeballs/
+aiohttp/
+aiosignal/
+attr/
+attrs/
+bitarray/
+cytoolz/
+ens/
+frozenlist/
+hexbytes/
+multidict/
+package/
+parsimonious/
+propcache/
+pycparser/
+pyunormalize/
+regex/
+requests-stubs/
+rlp/
+tlz/
+toolz/
+types_requests/
+websockets/
+yarl/
+bin/
+python/
+six.py
+typing_extensions.py
+
+# Dist-info folders
+*.dist-info/
+
+# Python path files
+*.pth
