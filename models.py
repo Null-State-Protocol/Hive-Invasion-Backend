@@ -20,6 +20,7 @@ class User:
     email_verified: bool = False
     is_active: bool = True
     last_login_at: Optional[str] = None
+    require_email_verification: bool = True  # User preference for email verification
     
     def to_dict(self) -> Dict:
         """Convert to dictionary (excluding sensitive data)"""

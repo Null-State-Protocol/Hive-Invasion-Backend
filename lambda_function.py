@@ -242,6 +242,10 @@ def handle_auth(event, context, method, path, origin):
             else:
                 return APIResponse.error(error, status_code=400, origin=origin)
         
+        # POST /auth/settings/email-verification - Toggle email verification requirement (requires auth)
+        elif path == 'auth/settings/email-verification' and method == 'POST':
+            return handle_toggle_email_verification(event, context)
+        
         # DELETE /auth/account - Delete account (requires auth)
         elif path == 'auth/account' and method == 'DELETE':
             return handle_delete_account(event, context)
@@ -426,6 +430,34 @@ def handle_delete_account(event, context, user_id):
             }))
         except:
             pass
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_toggle_email_verification(event, context, user_id):
+    """Toggle email verification requirement for user"""
+    origin = get_origin(event)
+    
+    try:
+        from email_auth import EmailAuthService
+        
+        auth_service = EmailAuthService()
+        success, error, new_value = auth_service.toggle_email_verification(user_id)
+        
+        if success:
+            status_text = "enabled" if new_value else "disabled"
+            return APIResponse.success(
+                {
+                    "message": f"Email verification requirement {status_text}",
+                    "require_email_verification": new_value
+                },
+                origin=origin
+            )
+        else:
+            return APIResponse.error(error, origin=origin)
+    
+    except Exception as e:
+        logger.error("Toggle email verification error", error=e, user_id=user_id)
         return APIResponse.server_error(origin=origin)
 
 

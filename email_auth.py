@@ -157,11 +157,15 @@ class EmailAuthService:
             if not user_data.get("is_active", True):
                 return False, None, "Account is deactivated"
             
-            # Check email verification (if enabled)
-            if config.ENABLE_EMAIL_VERIFICATION:
+            # Check email verification (if enabled globally AND user wants it)
+            user_requires_verification = user_data.get("require_email_verification", True)
+            if config.ENABLE_EMAIL_VERIFICATION and user_requires_verification:
                 if not user_data.get("email_verified", False):
-                    logger.warning("Login attempt with unverified email", context={"email": email})
-                    return False, None, "Please verify your email address before logging in. Check your inbox for the verification link."
+                    # Send new verification email
+                    logger.info("Sending new verification email on login attempt", context={"email": email})
+                    self._send_verification_email(email, user_id)
+                    logger.warning("Login blocked - email not verified", context={"email": email})
+                    return False, None, "Email verification required. A new verification email has been sent to your inbox."
             
             # Verify password
             password_hash = user_data.get("password_hash")
@@ -393,3 +397,42 @@ class EmailAuthService:
                 "Failed to send verification email",
                 context={"email": email, "user_id": user_id}
             )
+        
+        return send_success
+    
+    def toggle_email_verification(self, user_id: str) -> tuple[bool, Optional[str], bool]:
+        """
+        Toggle email verification requirement for a user
+        Returns: (success, error_message, new_setting_value)
+        """
+        try:
+            # Get current user data
+            response = self.users_table.get_item(Key={"user_id": user_id})
+            if "Item" not in response:
+                return False, "User not found", False
+            
+            user_data = response["Item"]
+            current_setting = user_data.get("require_email_verification", True)
+            new_setting = not current_setting
+            
+            # Update the setting
+            self.users_table.update_item(
+                Key={"user_id": user_id},
+                UpdateExpression="SET require_email_verification = :setting, updated_at = :now",
+                ExpressionAttributeValues={
+                    ":setting": new_setting,
+                    ":now": now_iso()
+                }
+            )
+            
+            logger.info("Email verification setting toggled", context={
+                "user_id": user_id,
+                "old_value": current_setting,
+                "new_value": new_setting
+            })
+            
+            return True, None, new_setting
+            
+        except Exception as e:
+            logger.error("Error toggling email verification", error=e, context={"user_id": user_id})
+            return False, str(e), False
