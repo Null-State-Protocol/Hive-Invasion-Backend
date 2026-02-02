@@ -12,6 +12,7 @@ from responses import APIResponse, get_origin, get_request_id
 from validation import validate_request_body, ValidationError
 from logger import logger
 from decorators import require_auth, optional_auth, rate_limit, log_request
+from models import now_iso
 
 # Import auth services
 from email_auth import EmailAuthService
@@ -53,6 +54,9 @@ def lambda_handler(event, context):
         # Route to appropriate handler
         if path.startswith('auth/'):
             return handle_auth(event, context, method, path, origin)
+        
+        elif path.startswith('session/'):
+            return handle_session(event, context, method, path, origin)
         
         elif path.startswith('game/') or path.startswith('player/'):
             return handle_game(event, context, method, path, origin)
@@ -131,6 +135,25 @@ def handle_auth(event, context, method, path, origin):
             if success:
                 return APIResponse.success(data, origin=origin)
             else:
+                # Check if error is email verification related
+                if error and "verify your email" in error.lower():
+                    # Send new verification code for 2-step login
+                    try:
+                        # Get user_id from email
+                        response = auth_service.user_emails_table.get_item(Key={"email": email.lower().strip()})
+                        if "Item" in response:
+                            user_id = response["Item"]["user_id"]
+                            # Send verification email
+                            auth_service._send_verification_email(email.lower().strip(), user_id, resend=True)
+                            logger.info(f"2-step verification code sent for {email}")
+                            return APIResponse.error(
+                                "Email verification required. A verification code has been sent to your email.",
+                                status_code=403,
+                                origin=origin
+                            )
+                    except Exception as e:
+                        logger.error("Failed to send verification code on login", error=e)
+                
                 return APIResponse.error(error, status_code=401, origin=origin)
         
         # POST /auth/wallet/message - Get message to sign
@@ -224,31 +247,75 @@ def handle_auth(event, context, method, path, origin):
             else:
                 return APIResponse.error(error, origin=origin)
         
-        # GET /auth/verify-email - Verify email with token
-        elif path == 'auth/verify-email' and method == 'GET':
-            params = event.get('queryStringParameters', {}) or {}
-            verification_token = params.get('token')
+        # POST /auth/verify-email - Verify email with 4-digit code
+        elif path == 'auth/verify-email' and method == 'POST':
+            body = validate_request_body(event.get('body'))
+            email = body.get('email', '').strip()
+            verification_code = body.get('code', '').strip()
+            return_token = body.get('return_token', False)  # For 2-step login flow
             
-            if not verification_token:
-                return APIResponse.error("Verification token is required", status_code=400, origin=origin)
+            if not email or not verification_code:
+                return APIResponse.error("Email and verification code are required", status_code=400, origin=origin)
             
-            logger.info(f"Email verification attempt with token: {verification_token[:10]}...")
+            logger.info(f"Email verification attempt for {email} (return_token={return_token})")
             
             auth_service = EmailAuthService()
-            success, error = auth_service.verify_email(verification_token)
+            success, data, error = auth_service.verify_email(email, verification_code, return_token=return_token)
             
             if success:
-                return APIResponse.success({"message": "Email verified successfully"}, origin=origin)
+                if return_token and data:
+                    # 2-step login flow - return user data and tokens
+                    return APIResponse.success(data, origin=origin)
+                else:
+                    # Registration flow - just confirmation
+                    return APIResponse.success({"message": "Email verified successfully"}, origin=origin)
             else:
                 return APIResponse.error(error, status_code=400, origin=origin)
         
-        # POST /auth/settings/email-verification - Toggle email verification requirement (requires auth)
-        elif path == 'auth/settings/email-verification' and method == 'POST':
-            return handle_toggle_email_verification(event, context)
+        # POST /auth/resend-code - Resend verification code
+        elif path == 'auth/resend-code' and method == 'POST':
+            body = validate_request_body(event.get('body'))
+            email = body.get('email', '').strip()
+            
+            if not email:
+                return APIResponse.error("Email is required", status_code=400, origin=origin)
+            
+            logger.info(f"Resend verification code request for {email}")
+            
+            auth_service = EmailAuthService()
+            success, error = auth_service.resend_verification_code(email)
+            
+            if success:
+                return APIResponse.success({"message": "Verification code resent successfully"}, origin=origin)
+            else:
+                return APIResponse.error(error, status_code=400, origin=origin)
+        
+        # POST /auth/complete-registration - Complete registration with password
+        elif path == 'auth/complete-registration' and method == 'POST':
+            body = validate_request_body(event.get('body'))
+            email = body.get('email', '').strip()
+            password = body.get('password', '').strip()
+            
+            if not email or not password:
+                return APIResponse.error("Email and password are required", status_code=400, origin=origin)
+            
+            logger.info(f"Complete registration for {email}")
+            
+            auth_service = EmailAuthService()
+            success, auth_data, error = auth_service.complete_registration(email, password)
+            
+            if success:
+                return APIResponse.success(auth_data, origin=origin)
+            else:
+                return APIResponse.error(error, status_code=400, origin=origin)
         
         # DELETE /auth/account - Delete account (requires auth)
         elif path == 'auth/account' and method == 'DELETE':
             return handle_delete_account(event, context)
+        
+        # PUT /auth/settings/2step - Update 2-step login setting (requires auth)
+        elif path == 'auth/settings/2step' and method == 'PUT':
+            return handle_update_2step_setting(event, context)
         
         else:
             return APIResponse.not_found("Auth endpoint", origin)
@@ -349,7 +416,7 @@ def handle_unlink_wallet(event, context, user_id):
 
 @require_auth()
 def handle_delete_account(event, context, user_id):
-    """Delete user account (GDPR compliance)"""
+    """Delete user account immediately (hard delete)"""
     origin = get_origin(event)
     
     try:
@@ -359,7 +426,7 @@ def handle_delete_account(event, context, user_id):
         
         dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
         
-        # 1. Get complete user data before deletion
+        # 1. Get user data before deletion
         users_table = dynamodb.Table(config.TABLE_USERS)
         user_response = users_table.get_item(Key={"user_id": user_id})
         
@@ -369,95 +436,124 @@ def handle_delete_account(event, context, user_id):
         user_data = user_response['Item']
         email = user_data.get('email', 'unknown')
         
-        # 2. Log deletion to deleted_accounts table for audit trail
-        deleted_accounts_table = dynamodb.Table(config.TABLE_DELETED_ACCOUNTS)
-        deletion_record = {
-            "user_id": user_id,
-            "email": email,
-            "deletion_requested_at": datetime.now(timezone.utc).isoformat(),
-            "deletion_scheduled_for": (datetime.now(timezone.utc) + timedelta(days=30)).isoformat(),
-            "original_user_data": json.dumps(user_data, default=str),
-            "ip_address": event.get('requestContext', {}).get('identity', {}).get('sourceIp', 'unknown'),
-            "user_agent": event.get('headers', {}).get('User-Agent', 'unknown'),
-            "reason": "user_requested",
-            "status": "pending"
-        }
-        
-        deleted_accounts_table.put_item(Item=deletion_record)
-        
-        logger.info("Account deletion scheduled", context={
-            "user_id": user_id,
-            "email": email,
-            "scheduled_date": deletion_record["deletion_scheduled_for"]
-        })
-        
-        # 3. Mark user as inactive (soft delete)
-        users_table.update_item(
-            Key={"user_id": user_id},
-            UpdateExpression="SET is_active = :inactive, deleted_at = :now",
-            ExpressionAttributeValues={
-                ":inactive": False,
-                ":now": datetime.now(timezone.utc).isoformat()
-            }
-        )
-        
-        # 4. Log to CloudWatch for additional audit
-        print(json.dumps({
-            "event": "ACCOUNT_DELETION_REQUESTED",
-            "user_id": user_id,
-            "email": email,
-            "timestamp": datetime.now(timezone.utc).isoformat(),
-            "ip": deletion_record["ip_address"]
-        }))
-        
-        return APIResponse.success(
-            {
-                "message": "Account deletion scheduled. Data will be removed within 30 days.",
-                "scheduled_deletion_date": deletion_record["deletion_scheduled_for"]
-            },
-            origin=origin
-        )
+        # 2. Delete from all tables
+        try:
+            # Delete from users table
+            users_table.delete_item(Key={"user_id": user_id})
+            
+            # Delete from user_emails table
+            if email and email != 'unknown':
+                user_emails_table = dynamodb.Table(config.TABLE_USER_EMAILS)
+                user_emails_table.delete_item(Key={"email": email})
+            
+            # Delete from email verification table
+            if email and email != 'unknown':
+                verification_table = dynamodb.Table(config.TABLE_EMAIL_VERIFICATION)
+                verification_table.delete_item(Key={"email": email})
+            
+            logger.info("Account deleted successfully", context={
+                "user_id": user_id,
+                "email": email
+            })
+            
+            return APIResponse.success(
+                {
+                    "message": "Account deleted successfully"
+                },
+                origin=origin
+            )
+            
+        except Exception as delete_error:
+            logger.error("Error during account deletion", error=delete_error, user_id=user_id)
+            raise delete_error
     
     except Exception as e:
         logger.error("Account deletion error", error=e, user_id=user_id)
-        # Log the error attempt as well
-        try:
-            print(json.dumps({
-                "event": "ACCOUNT_DELETION_FAILED",
-                "user_id": user_id,
-                "error": str(e),
-                "timestamp": datetime.now(timezone.utc).isoformat()
-            }))
-        except:
-            pass
         return APIResponse.server_error(origin=origin)
 
 
 @require_auth()
-def handle_toggle_email_verification(event, context, user_id):
-    """Toggle email verification requirement for user"""
+def handle_update_2step_setting(event, context, user_id):
+    """Update 2-step login (email verification) setting"""
     origin = get_origin(event)
     
     try:
-        from email_auth import EmailAuthService
+        body = validate_request_body(event.get('body'))
+        enabled = body.get('enabled', True)
+        verification_code = body.get('code')  # Optional verification code
+        send_code = body.get('send_code', False)  # Request to send code
         
-        auth_service = EmailAuthService()
-        success, error, new_value = auth_service.toggle_email_verification(user_id)
+        import boto3
+        dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+        users_table = dynamodb.Table(config.TABLE_USERS)
         
-        if success:
-            status_text = "enabled" if new_value else "disabled"
-            return APIResponse.success(
-                {
-                    "message": f"Email verification requirement {status_text}",
-                    "require_email_verification": new_value
-                },
-                origin=origin
+        # Get user data
+        user_response = users_table.get_item(Key={"user_id": user_id})
+        if "Item" not in user_response:
+            return APIResponse.error("User not found", status_code=404, origin=origin)
+        
+        user_data = user_response["Item"]
+        email = user_data.get("email")
+        
+        # If email not in user record, try hive_email_verification table
+        if not email:
+            verification_table = dynamodb.Table(config.TABLE_EMAIL_VERIFICATION)
+            # Query by user_id GSI to find their email
+            response = verification_table.query(
+                IndexName='user_id-index',
+                KeyConditionExpression='user_id = :uid',
+                ExpressionAttributeValues={':uid': user_id},
+                Limit=1
             )
-        else:
-            return APIResponse.error(error, origin=origin)
-    
+            if response.get('Items'):
+                email = response['Items'][0].get('email')
+        
+        if not email:
+            return APIResponse.error("Email not found for user", status_code=404, origin=origin)
+        
+        # If send_code requested, send verification code and return
+        if send_code:
+            from email_auth import EmailAuthService
+            auth_service = EmailAuthService()
+            auth_service._send_verification_email(email, user_id, resend=True)
+            logger.info("2-step toggle verification code sent", context={"user_id": user_id, "email": email})
+            return APIResponse.success({
+                "message": "Verification code sent to your email",
+                "code_sent": True
+            }, origin=origin)
+        
+        # If verification code provided, verify it
+        if verification_code:
+            from email_auth import EmailAuthService
+            auth_service = EmailAuthService()
+            success, _, error = auth_service.verify_email(email, verification_code, return_token=False)
+            if not success:
+                return APIResponse.error(error or "Invalid verification code", status_code=400, origin=origin)
+        
+        # Update user setting
+        users_table.update_item(
+            Key={"user_id": user_id},
+            UpdateExpression="SET require_email_verification = :enabled, updated_at = :now",
+            ExpressionAttributeValues={
+                ":enabled": enabled,
+                ":now": now_iso()
+            }
+        )
+        
+        logger.info("2-step setting updated", context={
+            "user_id": user_id,
+            "enabled": enabled
+        })
+        
+        return APIResponse.success({
+            "message": f"2-step login {'enabled' if enabled else 'disabled'}",
+            "require_email_verification": enabled
+        }, origin=origin)
+        
     except Exception as e:
-        logger.error("Toggle email verification error", error=e, user_id=user_id)
+        logger.error("Update 2-step setting error", error=e, user_id=user_id)
+        import traceback
+        logger.error("Traceback", context={"traceback": traceback.format_exc()})
         return APIResponse.server_error(origin=origin)
 
 
@@ -613,6 +709,7 @@ def handle_player_profile(event, context, user_id):
             'dust_count': player_data.get('dust_count', 0),
             'created_at': user.get('created_at'),
             'is_verified': user.get('email_verified', False),
+            'require_email_verification': user.get('require_email_verification', False),
             'last_login_at': user.get('last_login_at')
         }
         
@@ -764,3 +861,166 @@ def handle_health(event, context, origin):
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "environment": "production" if config.is_production() else "development"
     }, origin=origin)
+
+
+# ==================== SESSION HANDLERS ====================
+
+def handle_session(event, context, method, path, origin):
+    """
+    Handle game session endpoints.
+    
+    Routes:
+    - POST /session/start
+    - PUT /session/{session_id}/end
+    """
+    # Route to appropriate handler
+    if path == 'session/start' and method == 'POST':
+        return handle_session_start(event, context)
+    elif path.startswith('session/') and path.endswith('/end') and method == 'PUT':
+        return handle_session_end(event, context, path)
+    else:
+        return APIResponse.error(
+            f"Unsupported session endpoint: {method} {path}",
+            status_code=404,
+            error_code='NOT_FOUND',
+            origin=origin
+        )
+
+
+@require_auth()
+def handle_session_start(event, context, user_id):
+    """POST /session/start - Create new game session"""
+    from models import create_game_session
+    
+    try:
+        origin = get_origin(event)
+        body = validate_request_body(event.get('body'))
+        
+        difficulty = body.get('difficulty', 'normal')
+        game_mode = body.get('game_mode', 'survival')
+        
+        # Validate inputs
+        valid_difficulties = ['normal', 'hard', 'insane']
+        valid_modes = ['survival', 'endless', 'campaign']
+        
+        if difficulty not in valid_difficulties:
+            return APIResponse.error(
+                f"Invalid difficulty. Must be one of: {', '.join(valid_difficulties)}",
+                status_code=400,
+                error_code='INVALID_DIFFICULTY',
+                origin=origin
+            )
+        
+        if game_mode not in valid_modes:
+            return APIResponse.error(
+                f"Invalid game_mode. Must be one of: {', '.join(valid_modes)}",
+                status_code=400,
+                error_code='INVALID_GAME_MODE',
+                origin=origin
+            )
+        
+        # Create session
+        session = create_game_session(user_id, difficulty, game_mode)
+        
+        logger.info(f"Session started: {session['session_id']} by user {user_id}")
+        
+        return APIResponse.success(session, status_code=201, origin=origin)
+        
+    except Exception as e:
+        logger.error(f"Error in handle_session_start: {str(e)}")
+        return APIResponse.server_error(origin=get_origin(event))
+
+
+@require_auth()
+def handle_session_end(event, context, user_id, path):
+    """PUT /session/{session_id}/end - End game session"""
+    from models import (
+        get_game_session,
+        end_game_session,
+        update_player_progression,
+        update_leaderboard
+    )
+    
+    try:
+        origin = get_origin(event)
+        body = validate_request_body(event.get('body'))
+        
+        # Extract session_id from path
+        parts = path.split('/')
+        if len(parts) != 3:
+            return APIResponse.error(
+                "Invalid path format",
+                status_code=400,
+                error_code='INVALID_PATH',
+                origin=origin
+            )
+        
+        session_id = parts[1]
+        
+        # Get session
+        session = get_game_session(session_id)
+        if not session:
+            return APIResponse.error(
+                "Session not found",
+                status_code=404,
+                error_code='SESSION_NOT_FOUND',
+                origin=origin
+            )
+        
+        # Verify ownership
+        if session['user_id'] != user_id:
+            return APIResponse.error(
+                "Forbidden",
+                status_code=403,
+                error_code='FORBIDDEN',
+                origin=origin
+            )
+        
+        # Check if already ended
+        if session.get('status') == 'ended':
+            return APIResponse.error(
+                "Session already ended",
+                status_code=400,
+                error_code='SESSION_ALREADY_ENDED',
+                origin=origin
+            )
+        
+        # Get score/duration from request
+        score = body.get('score', 0)
+        duration_seconds = body.get('duration', 0)
+        end_reason = body.get('reason', 'completed')
+        
+        # End the session
+        end_game_session(session_id, score, duration_seconds, end_reason)
+        
+        # Calculate rewards
+        xp_earned = int(score * 0.1)
+        gold_earned = int(score * 0.5)
+        
+        # Update player progression
+        progression = update_player_progression(user_id, score, xp_earned, gold_earned)
+        
+        # Update leaderboards
+        try:
+            update_leaderboard(user_id, score, 'alltime')
+        except Exception as e:
+            logger.warning(f"Leaderboard update failed: {str(e)}")
+        
+        logger.info(f"Session ended: {session_id} - Score: {score}")
+        
+        return APIResponse.success({
+            'session_id': session_id,
+            'score': score,
+            'duration': duration_seconds,
+            'rewards': {
+                'xp_earned': xp_earned,
+                'gold_earned': gold_earned,
+                'level_up': progression.get('level_up', False),
+                'new_level': progression.get('new_level')
+            }
+        }, origin=origin)
+        
+    except Exception as e:
+        logger.error(f"Error in handle_session_end: {str(e)}")
+        return APIResponse.server_error(origin=get_origin(event))
+

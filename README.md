@@ -12,8 +12,9 @@
 ### Authentication System ✅
 - **Email/Password Authentication**
   - Secure registration with bcrypt password hashing
-  - Email verification via AWS SES (6-digit tokens)
-  - Login enforcement (blocks unverified users)
+  - Email verification via AWS SES (4-digit codes)
+  - 2-Step Login (user-configurable, disabled by default)
+  - Login enforcement (optional email verification per user preference)
   - Password reset flow with secure tokens
   
 - **MetaMask Wallet Integration**
