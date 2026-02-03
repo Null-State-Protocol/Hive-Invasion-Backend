@@ -1452,7 +1452,7 @@ def handle_keys(event, context, method, path, origin):
 def handle_key_purchase(event, context, user_id):
     """POST /keys/purchase - Purchase a key with SOMI payment on Somnia network"""
     from contract_adapter import ContractAdapter
-    from models import add_key_to_player, get_key_ownership, check_tx_hash_processed
+    from models import add_key_to_player
     from validation import Validator
     from datetime import datetime, timezone
     import uuid
@@ -1494,19 +1494,6 @@ def handle_key_purchase(event, context, user_id):
             context={"tx_hash": tx_hash, "wallet": wallet_address, "user_id": user_id}
         )
         
-        # Check if tx_hash was already processed (idempotency)
-        if check_tx_hash_processed(tx_hash):
-            logger.warning(
-                f"Duplicate transaction: {tx_hash}",
-                context={"reason": "already_processed"}
-            )
-            return APIResponse.error(
-                "This transaction has already been processed",
-                status_code=400,
-                error_code="DUPLICATE_TRANSACTION",
-                origin=origin
-            )
-        
         # Verify transaction on Somnia mainnet
         verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, wallet_address)
         
@@ -1523,7 +1510,8 @@ def handle_key_purchase(event, context, user_id):
                     "ok": False,
                     "pending": True,
                     "message": "Transaction not yet confirmed on-chain. Please try again in a moment.",
-                    "tx_hash": tx_hash
+                    "tx_hash": tx_hash,
+                    "retry_after_seconds": 10
                 }, status_code=202, origin=origin)
             
             # Failed verification (wrong amount, wrong recipient, etc)
@@ -1543,20 +1531,33 @@ def handle_key_purchase(event, context, user_id):
         timestamp = datetime.now(timezone.utc).isoformat()
         
         purchase_event = {
-            "event_id": str(uuid.uuid4()),
-            "user_id": user_id,
-            "wallet_address": wallet_address,
+            "event_id": tx_hash,  # Use tx_hash as event_id for unique identification
+            "tx_hash": tx_hash,
             "key_type": key_type,
             "timestamp": timestamp,
-            "tx_hash": tx_hash,
-            "status": "confirmed",
-            "price": str(ContractAdapter.get_expected_price(key_type) / 1e18),  # Convert to SOMI
-            "source": "somnia_mainnet",
-            "block_number": tx_data.get("blockNumber", 0)
+            "from_wallet": wallet_address,
+            "to_wallet": ContractAdapter.TREASURY_WALLET.lower(),
+            "amount_wei": str(ContractAdapter.get_expected_price(key_type)),
+            "status": "confirmed"
         }
         
-        # Update player's key ownership
-        new_balances = add_key_to_player(user_id, key_type, purchase_event)
+        # Update player's key ownership with idempotency guard
+        try:
+            new_balances = add_key_to_player(user_id, key_type, purchase_event)
+        except Exception as e:
+            if "already processed" in str(e):
+                logger.warning(
+                    f"Duplicate transaction attempt: {tx_hash}",
+                    context={"user_id": user_id}
+                )
+                return APIResponse.error(
+                    "This transaction has already been processed. Duplicate purchase rejected.",
+                    status_code=409,
+                    error_code="DUPLICATE_TRANSACTION",
+                    origin=origin
+                )
+            else:
+                raise
         
         logger.info(
             f"Key purchased successfully: {key_type}",
@@ -1573,6 +1574,14 @@ def handle_key_purchase(event, context, user_id):
             "key_type": key_type,
             "new_balances": new_balances,
             "tx_hash": tx_hash,
+            "message": "Key purchased successfully with verified SOMI payment on Somnia mainnet"
+        }, status_code=201, origin=origin)
+        
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, get_origin(event))
+    except Exception as e:
+        logger.error(f"Key purchase error: {str(e)}", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
             "message": "Key purchased successfully with verified SOMI payment"
         }, status_code=201, origin=origin)
         
