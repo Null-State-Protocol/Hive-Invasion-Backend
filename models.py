@@ -385,3 +385,91 @@ def update_leaderboard(user_id, score, board_type='alltime'):
         return True
     
     return False
+
+
+# ==================== KEY OWNERSHIP MANAGEMENT ====================
+
+def get_key_ownership(user_id):
+    """
+    Get player's key ownership counts from player_data table.
+    
+    Args:
+        user_id: User UUID
+    
+    Returns:
+        dict: {bronze: int, silver: int, gold: int}
+    """
+    table = dynamodb.Table('hive_player_data')
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    
+    # Get keys_owned map or default to 0 for each
+    keys_owned = player_data.get('keys_owned', {})
+    return {
+        'bronze': int(keys_owned.get('bronze', 0)),
+        'silver': int(keys_owned.get('silver', 0)),
+        'gold': int(keys_owned.get('gold', 0))
+    }
+
+
+def add_key_to_player(user_id, key_type, purchase_event):
+    """
+    Add a key to player's inventory and record purchase event.
+    
+    Args:
+        user_id: User UUID
+        key_type: "bronze", "silver", or "gold"
+        purchase_event: Purchase event dict from contract_adapter
+    
+    Returns:
+        dict: Updated key ownership {bronze: int, silver: int, gold: int}
+    """
+    table = dynamodb.Table('hive_player_data')
+    
+    # Get current ownership
+    current_keys = get_key_ownership(user_id)
+    
+    # Increment the key count
+    current_keys[key_type] += 1
+    
+    # Get current purchase history (limit to last 100)
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    purchase_history = player_data.get('key_purchase_history', [])
+    
+    # Add new purchase event
+    purchase_history.insert(0, purchase_event)  # Most recent first
+    purchase_history = purchase_history[:100]  # Keep last 100
+    
+    # Update player data with new counts and history
+    now = datetime.now(timezone.utc).isoformat()
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET keys_owned = :keys, key_purchase_history = :history, updated_at = :now',
+        ExpressionAttributeValues={
+            ':keys': current_keys,
+            ':history': purchase_history,
+            ':now': now
+        }
+    )
+    
+    return current_keys
+
+
+def get_key_purchase_history(user_id, limit=20):
+    """
+    Get player's key purchase history.
+    
+    Args:
+        user_id: User UUID
+        limit: Max number of events to return
+    
+    Returns:
+        list: Purchase event objects
+    """
+    table = dynamodb.Table('hive_player_data')
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    
+    history = player_data.get('key_purchase_history', [])
+    return history[:limit]

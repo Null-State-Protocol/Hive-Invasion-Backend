@@ -64,6 +64,9 @@ def lambda_handler(event, context):
         elif path.startswith('leaderboard/'):
             return handle_leaderboard(event, context, method, path, origin)
         
+        elif path.startswith('keys/'):
+            return handle_keys(event, context, method, path, origin)
+        
         elif path.startswith('analytics/'):
             return handle_analytics(event, context, method, path, origin)
         
@@ -1024,3 +1027,183 @@ def handle_session_end(event, context, user_id, path):
         logger.error(f"Error in handle_session_end: {str(e)}")
         return APIResponse.server_error(origin=get_origin(event))
 
+
+# ==================== KEY STORE HANDLERS ====================
+
+def handle_keys(event, context, method, path, origin):
+    """
+    Handle key purchase/ownership endpoints.
+    
+    Routes:
+    - POST /keys/purchase
+    - GET /keys/owned
+    - GET /keys/history
+    """
+    try:
+        # POST /keys/purchase - Purchase a key (mock contract)
+        if path == 'keys/purchase' and method == 'POST':
+            return handle_key_purchase(event, context)
+        
+        # GET /keys/owned - Get owned keys
+        elif path == 'keys/owned' and method == 'GET':
+            return handle_keys_owned(event, context)
+        
+        # GET /keys/history - Get purchase history
+        elif path == 'keys/history' and method == 'GET':
+            return handle_keys_history(event, context)
+        
+        else:
+            return APIResponse.error(
+                f"Unsupported keys endpoint: {method} {path}",
+                status_code=404,
+                error_code='NOT_FOUND',
+                origin=origin
+            )
+    
+    except Exception as e:
+        logger.error("Keys handler error", error=e)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_key_purchase(event, context, user_id):
+    """POST /keys/purchase - Purchase a key (mock contract)"""
+    from contract_adapter import ContractAdapter
+    from models import add_key_to_player, get_key_ownership
+    from validation import Validator
+    
+    try:
+        origin = get_origin(event)
+        body = validate_request_body(event.get('body'))
+        
+        # Validate inputs
+        key_type = Validator.required(body, 'key_type')
+        wallet_address = body.get('wallet_address', '').strip()
+        
+        # Verify user has a linked wallet
+        import boto3
+        dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+        users_table = dynamodb.Table(config.TABLE_USERS)
+        user_response = users_table.get_item(Key={"user_id": user_id})
+        
+        if 'Item' not in user_response:
+            return APIResponse.error("User not found", status_code=404, origin=origin)
+        
+        user_data = user_response['Item']
+        linked_wallet = user_data.get('wallet_address')
+        
+        # Ensure wallet is linked
+        if not linked_wallet:
+            return APIResponse.error(
+                "No wallet linked. Please connect your wallet first.",
+                status_code=400,
+                error_code="WALLET_NOT_LINKED",
+                origin=origin
+            )
+        
+        # Verify wallet_address matches linked wallet
+        if wallet_address and wallet_address.lower() != linked_wallet.lower():
+            return APIResponse.error(
+                "Wallet address mismatch",
+                status_code=400,
+                error_code="WALLET_MISMATCH",
+                origin=origin
+            )
+        
+        wallet_address = linked_wallet
+        
+        # Mock contract purchase
+        success, purchase_event, error = ContractAdapter.purchase_key_mock(
+            user_id, wallet_address, key_type
+        )
+        
+        if not success:
+            return APIResponse.error(error, status_code=400, origin=origin)
+        
+        # Update player's key ownership
+        new_balances = add_key_to_player(user_id, key_type.lower(), purchase_event)
+        
+        logger.info(
+            f"Key purchased: {key_type} by user {user_id}",
+            context={"tx_hash": purchase_event['tx_hash'], "wallet": wallet_address}
+        )
+        
+        return APIResponse.success({
+            "ok": True,
+            "key_type": key_type.lower(),
+            "new_balances": new_balances,
+            "tx_hash": purchase_event['tx_hash'],
+            "message": "purchase_confirmed_mock"
+        }, status_code=201, origin=origin)
+        
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, get_origin(event))
+    except Exception as e:
+        logger.error(f"Key purchase error: {str(e)}", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=get_origin(event))
+
+
+@require_auth()
+def handle_keys_owned(event, context, user_id):
+    """GET /keys/owned - Get player's owned keys"""
+    from contract_adapter import ContractAdapter
+    from models import get_key_ownership
+    
+    try:
+        origin = get_origin(event)
+        
+        # Get user's wallet address
+        import boto3
+        dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+        users_table = dynamodb.Table(config.TABLE_USERS)
+        user_response = users_table.get_item(Key={"user_id": user_id})
+        
+        if 'Item' not in user_response:
+            return APIResponse.error("User not found", status_code=404, origin=origin)
+        
+        user_data = user_response['Item']
+        wallet_address = user_data.get('wallet_address', '')
+        
+        # Get ownership from DB (mock contract check)
+        keys_owned_data = get_key_ownership(user_id)
+        ownership = ContractAdapter.get_owned_keys_mock(user_id, wallet_address, keys_owned_data)
+        
+        return APIResponse.success({
+            "wallet_address": wallet_address,
+            "owned": {
+                "bronze": ownership["bronze"],
+                "silver": ownership["silver"],
+                "gold": ownership["gold"]
+            },
+            "source": ownership["source"]
+        }, origin=origin)
+        
+    except Exception as e:
+        logger.error(f"Keys owned error: {str(e)}", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=get_origin(event))
+
+
+@require_auth()
+def handle_keys_history(event, context, user_id):
+    """GET /keys/history - Get key purchase history"""
+    from models import get_key_purchase_history
+    
+    try:
+        origin = get_origin(event)
+        
+        # Get query param for limit
+        query_params = event.get('queryStringParameters', {}) or {}
+        limit = int(query_params.get('limit', 20))
+        limit = min(limit, 100)  # Max 100
+        
+        # Get purchase history
+        history = get_key_purchase_history(user_id, limit)
+        
+        return APIResponse.success({
+            "history": history,
+            "count": len(history)
+        }, origin=origin)
+        
+    except Exception as e:
+        logger.error(f"Keys history error: {str(e)}", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=get_origin(event))
