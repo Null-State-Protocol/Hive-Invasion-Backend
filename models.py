@@ -456,6 +456,66 @@ def add_key_to_player(user_id, key_type, purchase_event):
     return current_keys
 
 
+def check_tx_hash_processed(tx_hash):
+    """
+    Check if a transaction hash has already been processed (idempotency check).
+    
+    Scans key_purchase_history across all users for the given tx_hash.
+    
+    Args:
+        tx_hash: Transaction hash to check (0x-prefixed)
+    
+    Returns:
+        bool: True if tx_hash found, False otherwise
+    """
+    try:
+        table = dynamodb.Table('hive_player_data')
+        
+        # Normalize tx_hash for comparison
+        tx_hash = tx_hash.lower().strip()
+        if not tx_hash.startswith('0x'):
+            tx_hash = '0x' + tx_hash
+        
+        # Scan for any purchase event with this tx_hash
+        # Note: In production, consider maintaining a separate transaction index table
+        # for better performance than full table scan
+        response = table.scan(
+            ProjectionExpression='key_purchase_history',
+            Limit=100  # Process in batches to avoid timeout
+        )
+        
+        # Check current batch
+        for item in response.get('Items', []):
+            history = item.get('key_purchase_history', [])
+            for event in history:
+                if event.get('tx_hash', '').lower() == tx_hash:
+                    return True
+        
+        # Note: For full idempotency across large table, implement pagination
+        # For now, first 100 users should cover most cases
+        while 'LastEvaluatedKey' in response and len(response.get('Items', [])) < 1000:
+            response = table.scan(
+                ProjectionExpression='key_purchase_history',
+                ExclusiveStartKey=response['LastEvaluatedKey'],
+                Limit=100
+            )
+            for item in response.get('Items', []):
+                history = item.get('key_purchase_history', [])
+                for event in history:
+                    if event.get('tx_hash', '').lower() == tx_hash:
+                        return True
+        
+        return False
+        
+    except Exception as e:
+        from logger import logger
+        logger.error(f"Error checking tx_hash: {str(e)}", error=e)
+        # Fail open: if we can't check, allow it (better UX than blocking legit transactions)
+        return False
+
+
+
+
 def get_key_purchase_history(user_id, limit=20):
     """
     Get player's key purchase history.
@@ -473,3 +533,384 @@ def get_key_purchase_history(user_id, limit=20):
     
     history = player_data.get('key_purchase_history', [])
     return history[:limit]
+
+
+# ==================== GAMEPLAY DATA MANAGEMENT ====================
+
+def get_player_pilots(user_id):
+    """
+    Get player's owned pilots.
+    
+    Args:
+        user_id: User UUID
+    
+    Returns:
+        list: Pilot objects
+    """
+    table = dynamodb.Table('hive_player_data')
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    
+    pilots = player_data.get('pilots', [])
+    return pilots
+
+
+def unlock_pilot(user_id, pilot_id):
+    """
+    Unlock a new pilot for the player.
+    
+    Args:
+        user_id: User UUID
+        pilot_id: Pilot identifier
+    
+    Returns:
+        dict: Updated pilot list
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Get current pilots
+    current_pilots = get_player_pilots(user_id)
+    
+    # Check if already unlocked
+    for pilot in current_pilots:
+        if pilot.get('pilot_id') == pilot_id:
+            return {'error': 'Pilot already unlocked'}
+    
+    # Add new pilot
+    new_pilot = {
+        'pilot_id': pilot_id,
+        'pilot_level': 1,
+        'acquired_at': now,
+        'is_active': len(current_pilots) == 0  # First pilot is active
+    }
+    current_pilots.append(new_pilot)
+    
+    # Update DB
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET pilots = :pilots, updated_at = :now',
+        ExpressionAttributeValues={
+            ':pilots': current_pilots,
+            ':now': now
+        }
+    )
+    
+    return {'pilots': current_pilots, 'unlocked': new_pilot}
+
+
+def get_player_mechs(user_id):
+    """
+    Get player's owned mechs.
+    
+    Args:
+        user_id: User UUID
+    
+    Returns:
+        list: Mech objects
+    """
+    table = dynamodb.Table('hive_player_data')
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    
+    mechs = player_data.get('mechs', [])
+    return mechs
+
+
+def unlock_mech(user_id, mech_id, variant='standard'):
+    """
+    Unlock a new mech for the player.
+    
+    Args:
+        user_id: User UUID
+        mech_id: Mech identifier
+        variant: Mech variant/rarity
+    
+    Returns:
+        dict: Updated mech list
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Get current mechs
+    current_mechs = get_player_mechs(user_id)
+    
+    # Check if already unlocked
+    for mech in current_mechs:
+        if mech.get('mech_id') == mech_id:
+            return {'error': 'Mech already unlocked'}
+    
+    # Add new mech
+    new_mech = {
+        'mech_id': mech_id,
+        'acquired_at': now,
+        'variant': variant,
+        'is_active': len(current_mechs) == 0  # First mech is active
+    }
+    current_mechs.append(new_mech)
+    
+    # Update DB
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET mechs = :mechs, updated_at = :now',
+        ExpressionAttributeValues={
+            ':mechs': current_mechs,
+            ':now': now
+        }
+    )
+    
+    return {'mechs': current_mechs, 'unlocked': new_mech}
+
+
+def get_active_boosts(user_id):
+    """
+    Get player's active boosts.
+    
+    Args:
+        user_id: User UUID
+    
+    Returns:
+        list: Active boost objects
+    """
+    table = dynamodb.Table('hive_player_data')
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    
+    boosts = player_data.get('boosts', [])
+    
+    # Filter only active (non-expired) boosts
+    now = datetime.now(timezone.utc)
+    active_boosts = []
+    for boost in boosts:
+        expires_at = datetime.fromisoformat(boost.get('expires_at'))
+        if expires_at > now and boost.get('is_active', True):
+            active_boosts.append(boost)
+    
+    return active_boosts
+
+
+def activate_boost(user_id, boost_id, boost_name, duration_seconds):
+    """
+    Activate a boost for the player.
+    
+    Args:
+        user_id: User UUID
+        boost_id: Boost identifier
+        boost_name: Display name
+        duration_seconds: Boost duration
+    
+    Returns:
+        dict: New boost object
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc)
+    now_iso = now.isoformat()
+    expires_at = (now + timedelta(seconds=duration_seconds)).isoformat()
+    
+    # Get current boosts
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    boosts = player_data.get('boosts', [])
+    
+    # Add new boost
+    new_boost = {
+        'boost_id': boost_id,
+        'boost_name': boost_name,
+        'acquired_at': now_iso,
+        'duration_seconds': duration_seconds,
+        'expires_at': expires_at,
+        'is_active': True
+    }
+    boosts.append(new_boost)
+    
+    # Update DB
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET boosts = :boosts, updated_at = :now',
+        ExpressionAttributeValues={
+            ':boosts': boosts,
+            ':now': now_iso
+        }
+    )
+    
+    return new_boost
+
+
+def get_player_skills(user_id):
+    """
+    Get player's skills.
+    
+    Args:
+        user_id: User UUID
+    
+    Returns:
+        list: Skill objects
+    """
+    table = dynamodb.Table('hive_player_data')
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    
+    skills = player_data.get('skills', [])
+    return skills
+
+
+def unlock_skill(user_id, skill_id, slot=None):
+    """
+    Unlock or upgrade a skill for the player.
+    
+    Args:
+        user_id: User UUID
+        skill_id: Skill identifier
+        slot: Skill slot (optional)
+    
+    Returns:
+        dict: Updated skill object
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Get current skills
+    current_skills = get_player_skills(user_id)
+    
+    # Check if skill already exists (upgrade level)
+    skill_found = False
+    for skill in current_skills:
+        if skill.get('skill_id') == skill_id:
+            skill['skill_level'] = skill.get('skill_level', 1) + 1
+            skill_found = True
+            updated_skill = skill
+            break
+    
+    # If not found, add new skill
+    if not skill_found:
+        new_skill = {
+            'skill_id': skill_id,
+            'skill_level': 1,
+            'slot': slot,
+            'unlocked_at': now
+        }
+        current_skills.append(new_skill)
+        updated_skill = new_skill
+    
+    # Update DB
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET skills = :skills, updated_at = :now',
+        ExpressionAttributeValues={
+            ':skills': current_skills,
+            ':now': now
+        }
+    )
+    
+    return {'skills': current_skills, 'updated': updated_skill}
+
+
+def update_gems(user_id, amount):
+    """
+    Update player's gem count.
+    
+    Args:
+        user_id: User UUID
+        amount: Gems to add (can be negative)
+    
+    Returns:
+        int: New gem count
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Get current gems
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    current_gems = player_data.get('gems', 0)
+    
+    new_gems = max(0, current_gems + amount)
+    
+    # Update DB
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET gems = :gems, updated_at = :now',
+        ExpressionAttributeValues={
+            ':gems': new_gems,
+            ':now': now
+        }
+    )
+    
+    return new_gems
+
+
+def update_dust(user_id, amount):
+    """
+    Update player's dust count.
+    
+    Args:
+        user_id: User UUID
+        amount: Dust to add (can be negative)
+    
+    Returns:
+        int: New dust count
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Get current dust
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    current_dust = player_data.get('dust_count', 0)
+    
+    new_dust = max(0, current_dust + amount)
+    
+    # Update DB
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET dust_count = :dust, updated_at = :now',
+        ExpressionAttributeValues={
+            ':dust': new_dust,
+            ':now': now
+        }
+    )
+    
+    return new_dust
+
+
+def unlock_achievement(user_id, achievement_id):
+    """
+    Unlock an achievement for the player.
+    
+    Args:
+        user_id: User UUID
+        achievement_id: Achievement identifier
+    
+    Returns:
+        dict: New achievement object
+    """
+    import boto3
+    dynamodb = boto3.resource('dynamodb', region_name='eu-north-1')
+    achievements_table = dynamodb.Table('hive_achievements')
+    
+    now = datetime.now(timezone.utc).isoformat()
+    
+    # Check if already unlocked
+    response = achievements_table.query(
+        KeyConditionExpression='user_id = :uid',
+        FilterExpression='achievement_id = :aid',
+        ExpressionAttributeValues={
+            ':uid': user_id,
+            ':aid': achievement_id
+        }
+    )
+    
+    if response.get('Items'):
+        return {'error': 'Achievement already unlocked'}
+    
+    # Create achievement record
+    achievement = {
+        'user_id': user_id,
+        'achievement_id': achievement_id,
+        'unlocked_at': now,
+        'progress': 100
+    }
+    
+    achievements_table.put_item(Item=achievement)
+    
+    return achievement

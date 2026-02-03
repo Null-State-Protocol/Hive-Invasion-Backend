@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 
 # Import utilities
 from config import config
-from responses import APIResponse, get_origin, get_request_id
+from responses import APIResponse, get_origin, get_request_id, inject_cors_headers
 from validation import validate_request_body, ValidationError
 from logger import logger
 from decorators import require_auth, optional_auth, rate_limit, log_request
@@ -30,60 +30,73 @@ def lambda_handler(event, context):
     """
     Main Lambda handler
     Routes requests to appropriate handlers
+    
+    CRITICAL: All responses are wrapped with inject_cors_headers() to guarantee
+    CORS headers are present on every response (success, error, exception).
     """
+    origin = get_origin(event)  # Extract origin early, before any routing
+    
     try:
         # Validate configuration on cold start
         if hasattr(lambda_handler, '_first_run'):
             errors = config.validate()
             if errors and config.is_production():
                 logger.critical("Configuration errors", context={"errors": errors})
-                return APIResponse.server_error("Service misconfigured")
+                return inject_cors_headers(
+                    APIResponse.server_error("Service misconfigured", origin=origin),
+                    origin
+                )
             lambda_handler._first_run = False
         
-        origin = get_origin(event)
         method = event.get('httpMethod') or event.get('requestContext', {}).get('http', {}).get('method', 'GET')
         path = event.get('path') or event.get('rawPath', '/')
         
         # Normalize path
         path = path.strip('/').lower()
         
-        # Handle OPTIONS (CORS preflight)
+        # Handle OPTIONS (CORS preflight) - MUST be before auth checks
         if method == 'OPTIONS':
-            return APIResponse.options(origin)
+            return inject_cors_headers(APIResponse.options(origin), origin)
         
         # Route to appropriate handler
         if path.startswith('auth/'):
-            return handle_auth(event, context, method, path, origin)
+            return inject_cors_headers(handle_auth(event, context, method, path, origin), origin)
         
         elif path.startswith('session/'):
-            return handle_session(event, context, method, path, origin)
+            return inject_cors_headers(handle_session(event, context, method, path, origin), origin)
         
         elif path.startswith('game/') or path.startswith('player/'):
-            return handle_game(event, context, method, path, origin)
+            return inject_cors_headers(handle_game(event, context, method, path, origin), origin)
         
         elif path.startswith('leaderboard/'):
-            return handle_leaderboard(event, context, method, path, origin)
+            return inject_cors_headers(handle_leaderboard(event, context, method, path, origin), origin)
         
         elif path.startswith('keys/'):
-            return handle_keys(event, context, method, path, origin)
+            return inject_cors_headers(handle_keys(event, context, method, path, origin), origin)
         
         elif path.startswith('analytics/'):
-            return handle_analytics(event, context, method, path, origin)
+            return inject_cors_headers(handle_analytics(event, context, method, path, origin), origin)
         
         elif path in ('', 'health', 'ping'):
-            return handle_health(event, context, origin)
+            return inject_cors_headers(handle_health(event, context, origin), origin)
         
         else:
-            return APIResponse.error(
-                f"Endpoint not found: {method} /{path}",
-                status_code=404,
-                error_code="NOT_FOUND",
-                origin=origin
+            return inject_cors_headers(
+                APIResponse.error(
+                    f"Endpoint not found: {method} /{path}",
+                    status_code=404,
+                    error_code="NOT_FOUND",
+                    origin=origin
+                ),
+                origin
             )
     
     except ValidationError as e:
         logger.warning(f"Validation error: {e.message}", context={"field": e.field})
-        return APIResponse.validation_error(e.field, e.message, get_origin(event))
+        return inject_cors_headers(
+            APIResponse.validation_error(e.field, e.message, origin),
+            origin
+        )
     
     except Exception as e:
         import traceback
@@ -96,7 +109,10 @@ def lambda_handler(event, context):
         }
         logger.error(f"Unhandled error in lambda_handler", error=e, context=error_details)
         print(f"[DETAILED ERROR] {error_details}")  # Extra stdout logging
-        return APIResponse.server_error(origin=get_origin(event))
+        return inject_cors_headers(
+            APIResponse.server_error("Internal server error", origin=origin),
+            origin
+        )
 
 
 lambda_handler._first_run = True
@@ -650,6 +666,58 @@ def handle_game(event, context, method, path, origin):
         elif path == 'player/achievements' and method == 'GET':
             return handle_player_achievements(event, context)
         
+        # POST /player/achievements/unlock - Unlock achievement
+        elif path == 'player/achievements/unlock' and method == 'POST':
+            return handle_unlock_achievement(event, context)
+        
+        # GET /player/pilots - Get owned pilots
+        elif path == 'player/pilots' and method == 'GET':
+            return handle_player_pilots(event, context)
+        
+        # POST /player/pilots - Unlock pilot
+        elif path == 'player/pilots' and method == 'POST':
+            return handle_unlock_pilot(event, context)
+        
+        # GET /player/mechs - Get owned mechs
+        elif path == 'player/mechs' and method == 'GET':
+            return handle_player_mechs(event, context)
+        
+        # POST /player/mechs - Unlock mech
+        elif path == 'player/mechs' and method == 'POST':
+            return handle_unlock_mech(event, context)
+        
+        # GET /player/boosts - Get active boosts
+        elif path == 'player/boosts' and method == 'GET':
+            return handle_player_boosts(event, context)
+        
+        # POST /player/boosts - Activate boost
+        elif path == 'player/boosts' and method == 'POST':
+            return handle_activate_boost(event, context)
+        
+        # GET /player/skills - Get skills
+        elif path == 'player/skills' and method == 'GET':
+            return handle_player_skills(event, context)
+        
+        # POST /player/skills - Unlock/upgrade skill
+        elif path == 'player/skills' and method == 'POST':
+            return handle_unlock_skill(event, context)
+        
+        # GET /player/gems - Get gems
+        elif path == 'player/gems' and method == 'GET':
+            return handle_player_gems(event, context)
+        
+        # PUT /player/gems - Update gems
+        elif path == 'player/gems' and method == 'PUT':
+            return handle_update_gems(event, context)
+        
+        # GET /player/dust - Get dust
+        elif path == 'player/dust' and method == 'GET':
+            return handle_player_dust(event, context)
+        
+        # PUT /player/dust - Update dust
+        elif path == 'player/dust' and method == 'PUT':
+            return handle_update_dust(event, context)
+        
         else:
             return APIResponse.success(
                 {"message": "Game endpoints - to be implemented"},
@@ -710,6 +778,11 @@ def handle_player_profile(event, context, user_id):
             'games_won': player_data.get('games_won', 0),
             'highest_wave': player_data.get('highest_wave', 0),
             'dust_count': player_data.get('dust_count', 0),
+            'gems': player_data.get('gems', 0),
+            'pilots': player_data.get('pilots', []),
+            'mechs': player_data.get('mechs', []),
+            'boosts': player_data.get('boosts', []),
+            'skills': player_data.get('skills', []),
             'created_at': user.get('created_at'),
             'is_verified': user.get('email_verified', False),
             'require_email_verification': user.get('require_email_verification', False),
@@ -746,6 +819,282 @@ def handle_player_achievements(event, context, user_id):
     
     except Exception as e:
         logger.error("Player achievements error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_unlock_achievement(event, context, user_id):
+    """Unlock an achievement"""
+    origin = get_origin(event)
+    
+    try:
+        from models import unlock_achievement
+        from validation import Validator
+        
+        body = validate_request_body(event.get('body'))
+        achievement_id = Validator.required(body, 'achievement_id')
+        
+        result = unlock_achievement(user_id, achievement_id)
+        
+        if 'error' in result:
+            return APIResponse.error(result['error'], status_code=400, origin=origin)
+        
+        return APIResponse.success(result, status_code=201, origin=origin)
+    
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, origin)
+    except Exception as e:
+        logger.error("Unlock achievement error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_player_pilots(event, context, user_id):
+    """Get player's pilots"""
+    origin = get_origin(event)
+    
+    try:
+        from models import get_player_pilots
+        
+        pilots = get_player_pilots(user_id)
+        return APIResponse.success({'pilots': pilots}, origin=origin)
+    
+    except Exception as e:
+        logger.error("Player pilots error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_unlock_pilot(event, context, user_id):
+    """Unlock a pilot"""
+    origin = get_origin(event)
+    
+    try:
+        from models import unlock_pilot
+        from validation import Validator
+        
+        body = validate_request_body(event.get('body'))
+        pilot_id = Validator.required(body, 'pilot_id')
+        
+        result = unlock_pilot(user_id, pilot_id)
+        
+        if 'error' in result:
+            return APIResponse.error(result['error'], status_code=400, origin=origin)
+        
+        return APIResponse.success(result, status_code=201, origin=origin)
+    
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, origin)
+    except Exception as e:
+        logger.error("Unlock pilot error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_player_mechs(event, context, user_id):
+    """Get player's mechs"""
+    origin = get_origin(event)
+    
+    try:
+        from models import get_player_mechs
+        
+        mechs = get_player_mechs(user_id)
+        return APIResponse.success({'mechs': mechs}, origin=origin)
+    
+    except Exception as e:
+        logger.error("Player mechs error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_unlock_mech(event, context, user_id):
+    """Unlock a mech"""
+    origin = get_origin(event)
+    
+    try:
+        from models import unlock_mech
+        from validation import Validator
+        
+        body = validate_request_body(event.get('body'))
+        mech_id = Validator.required(body, 'mech_id')
+        variant = body.get('variant', 'standard')
+        
+        result = unlock_mech(user_id, mech_id, variant)
+        
+        if 'error' in result:
+            return APIResponse.error(result['error'], status_code=400, origin=origin)
+        
+        return APIResponse.success(result, status_code=201, origin=origin)
+    
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, origin)
+    except Exception as e:
+        logger.error("Unlock mech error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_player_boosts(event, context, user_id):
+    """Get player's active boosts"""
+    origin = get_origin(event)
+    
+    try:
+        from models import get_active_boosts
+        
+        boosts = get_active_boosts(user_id)
+        return APIResponse.success({'boosts': boosts}, origin=origin)
+    
+    except Exception as e:
+        logger.error("Player boosts error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_activate_boost(event, context, user_id):
+    """Activate a boost"""
+    origin = get_origin(event)
+    
+    try:
+        from models import activate_boost
+        from validation import Validator
+        
+        body = validate_request_body(event.get('body'))
+        boost_id = Validator.required(body, 'boost_id')
+        boost_name = Validator.required(body, 'boost_name')
+        duration_seconds = int(body.get('duration_seconds', 3600))
+        
+        result = activate_boost(user_id, boost_id, boost_name, duration_seconds)
+        return APIResponse.success(result, status_code=201, origin=origin)
+    
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, origin)
+    except Exception as e:
+        logger.error("Activate boost error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_player_skills(event, context, user_id):
+    """Get player's skills"""
+    origin = get_origin(event)
+    
+    try:
+        from models import get_player_skills
+        
+        skills = get_player_skills(user_id)
+        return APIResponse.success({'skills': skills}, origin=origin)
+    
+    except Exception as e:
+        logger.error("Player skills error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_unlock_skill(event, context, user_id):
+    """Unlock or upgrade a skill"""
+    origin = get_origin(event)
+    
+    try:
+        from models import unlock_skill
+        from validation import Validator
+        
+        body = validate_request_body(event.get('body'))
+        skill_id = Validator.required(body, 'skill_id')
+        slot = body.get('slot')
+        
+        result = unlock_skill(user_id, skill_id, slot)
+        return APIResponse.success(result, status_code=201, origin=origin)
+    
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, origin)
+    except Exception as e:
+        logger.error("Unlock skill error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_player_gems(event, context, user_id):
+    """Get player's gems"""
+    origin = get_origin(event)
+    
+    try:
+        import boto3
+        dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+        player_table = dynamodb.Table(config.TABLE_PLAYER_DATA)
+        
+        response = player_table.get_item(Key={"user_id": user_id})
+        player_data = response.get('Item', {})
+        gems = player_data.get('gems', 0)
+        
+        return APIResponse.success({'gems': int(gems)}, origin=origin)
+    
+    except Exception as e:
+        logger.error("Player gems error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_update_gems(event, context, user_id):
+    """Update player's gems"""
+    origin = get_origin(event)
+    
+    try:
+        from models import update_gems
+        from validation import Validator
+        
+        body = validate_request_body(event.get('body'))
+        amount = int(Validator.required(body, 'amount'))
+        
+        new_gems = update_gems(user_id, amount)
+        return APIResponse.success({'gems': new_gems}, origin=origin)
+    
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, origin)
+    except Exception as e:
+        logger.error("Update gems error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_player_dust(event, context, user_id):
+    """Get player's dust"""
+    origin = get_origin(event)
+    
+    try:
+        import boto3
+        dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+        player_table = dynamodb.Table(config.TABLE_PLAYER_DATA)
+        
+        response = player_table.get_item(Key={"user_id": user_id})
+        player_data = response.get('Item', {})
+        dust = player_data.get('dust_count', 0)
+        
+        return APIResponse.success({'dust': int(dust)}, origin=origin)
+    
+    except Exception as e:
+        logger.error("Player dust error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_update_dust(event, context, user_id):
+    """Update player's dust"""
+    origin = get_origin(event)
+    
+    try:
+        from models import update_dust
+        from validation import Validator
+        
+        body = validate_request_body(event.get('body'))
+        amount = int(Validator.required(body, 'amount'))
+        
+        new_dust = update_dust(user_id, amount)
+        return APIResponse.success({'dust': new_dust}, origin=origin)
+    
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, origin)
+    except Exception as e:
+        logger.error("Update dust error", error=e, user_id=user_id)
         return APIResponse.server_error(origin=origin)
 
 
@@ -829,12 +1178,39 @@ def handle_player_rank(event, context, user_id):
     origin = get_origin(event)
     
     try:
-        # Return default rank for now
+        import boto3
+        from boto3.dynamodb.conditions import Key
+        dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+
+        def get_rank(table_name, period=None):
+            table = dynamodb.Table(table_name)
+            if period:
+                response = table.query(
+                    KeyConditionExpression=Key('period').eq(period)
+                )
+                items = response.get('Items', [])
+            else:
+                response = table.scan()
+                items = response.get('Items', [])
+
+            if not items:
+                return None
+
+            items.sort(key=lambda x: x.get('score', 0), reverse=True)
+            for idx, item in enumerate(items, start=1):
+                if item.get('user_id') == user_id:
+                    return idx
+            return None
+
+        daily_rank = get_rank(config.TABLE_LEADERBOARD_DAILY, period='daily')
+        weekly_rank = get_rank(config.TABLE_LEADERBOARD_WEEKLY, period='weekly')
+        alltime_rank = get_rank(config.TABLE_LEADERBOARD_ALLTIME)
+
         return APIResponse.success({
             'rank': {
-                'daily': None,
-                'weekly': None,
-                'alltime': None
+                'daily': daily_rank,
+                'weekly': weekly_rank,
+                'alltime': alltime_rank
             }
         }, origin=origin)
     
@@ -999,9 +1375,14 @@ def handle_session_end(event, context, user_id, path):
         # Calculate rewards
         xp_earned = int(score * 0.1)
         gold_earned = int(score * 0.5)
+        dust_earned = int(score * 0.2)  # New: dust reward
         
         # Update player progression
         progression = update_player_progression(user_id, score, xp_earned, gold_earned)
+        
+        # Update dust
+        from models import update_dust
+        new_dust = update_dust(user_id, dust_earned)
         
         # Update leaderboards
         try:
@@ -1018,6 +1399,8 @@ def handle_session_end(event, context, user_id, path):
             'rewards': {
                 'xp_earned': xp_earned,
                 'gold_earned': gold_earned,
+                'dust_earned': dust_earned,
+                'new_dust': new_dust,
                 'level_up': progression.get('level_up', False),
                 'new_level': progression.get('new_level')
             }
@@ -1067,10 +1450,12 @@ def handle_keys(event, context, method, path, origin):
 
 @require_auth()
 def handle_key_purchase(event, context, user_id):
-    """POST /keys/purchase - Purchase a key (mock contract)"""
+    """POST /keys/purchase - Purchase a key with SOMI payment on Somnia network"""
     from contract_adapter import ContractAdapter
-    from models import add_key_to_player, get_key_ownership
+    from models import add_key_to_player, get_key_ownership, check_tx_hash_processed
     from validation import Validator
+    from datetime import datetime, timezone
+    import uuid
     
     try:
         origin = get_origin(event)
@@ -1078,7 +1463,10 @@ def handle_key_purchase(event, context, user_id):
         
         # Validate inputs
         key_type = Validator.required(body, 'key_type')
-        wallet_address = body.get('wallet_address', '').strip()
+        tx_hash = Validator.required(body, 'tx_hash')
+        
+        # Normalize key_type
+        key_type = key_type.lower()
         
         # Verify user has a linked wallet
         import boto3
@@ -1090,10 +1478,10 @@ def handle_key_purchase(event, context, user_id):
             return APIResponse.error("User not found", status_code=404, origin=origin)
         
         user_data = user_response['Item']
-        linked_wallet = user_data.get('wallet_address')
+        wallet_address = user_data.get('wallet_address', '').lower()
         
         # Ensure wallet is linked
-        if not linked_wallet:
+        if not wallet_address:
             return APIResponse.error(
                 "No wallet linked. Please connect your wallet first.",
                 status_code=400,
@@ -1101,45 +1489,98 @@ def handle_key_purchase(event, context, user_id):
                 origin=origin
             )
         
-        # Verify wallet_address matches linked wallet
-        if wallet_address and wallet_address.lower() != linked_wallet.lower():
+        logger.info(
+            f"Starting SOMI payment verification: {key_type}",
+            context={"tx_hash": tx_hash, "wallet": wallet_address, "user_id": user_id}
+        )
+        
+        # Check if tx_hash was already processed (idempotency)
+        if check_tx_hash_processed(tx_hash):
+            logger.warning(
+                f"Duplicate transaction: {tx_hash}",
+                context={"reason": "already_processed"}
+            )
             return APIResponse.error(
-                "Wallet address mismatch",
+                "This transaction has already been processed",
                 status_code=400,
-                error_code="WALLET_MISMATCH",
+                error_code="DUPLICATE_TRANSACTION",
                 origin=origin
             )
         
-        wallet_address = linked_wallet
+        # Verify transaction on Somnia mainnet
+        verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, wallet_address)
         
-        # Mock contract purchase
-        success, purchase_event, error = ContractAdapter.purchase_key_mock(
-            user_id, wallet_address, key_type
-        )
+        if not verification.get("verified"):
+            status = verification.get("status")
+            reason = verification.get("reason", "Unknown error")
+            
+            if status == "pending":
+                logger.info(
+                    f"Transaction pending on-chain: {tx_hash}",
+                    context={"reason": reason}
+                )
+                return APIResponse.success({
+                    "ok": False,
+                    "pending": True,
+                    "message": "Transaction not yet confirmed on-chain. Please try again in a moment.",
+                    "tx_hash": tx_hash
+                }, status_code=202, origin=origin)
+            
+            # Failed verification (wrong amount, wrong recipient, etc)
+            logger.warning(
+                f"Transaction verification failed: {tx_hash}",
+                context={"reason": reason, "status": status}
+            )
+            return APIResponse.error(
+                f"Transaction verification failed: {reason}",
+                status_code=400,
+                error_code=f"TX_VERIFICATION_FAILED_{status}",
+                origin=origin
+            )
         
-        if not success:
-            return APIResponse.error(error, status_code=400, origin=origin)
+        # Transaction verified! Create purchase event
+        tx_data = verification.get("tx_data", {})
+        timestamp = datetime.now(timezone.utc).isoformat()
+        
+        purchase_event = {
+            "event_id": str(uuid.uuid4()),
+            "user_id": user_id,
+            "wallet_address": wallet_address,
+            "key_type": key_type,
+            "timestamp": timestamp,
+            "tx_hash": tx_hash,
+            "status": "confirmed",
+            "price": str(ContractAdapter.get_expected_price(key_type) / 1e18),  # Convert to SOMI
+            "source": "somnia_mainnet",
+            "block_number": tx_data.get("blockNumber", 0)
+        }
         
         # Update player's key ownership
-        new_balances = add_key_to_player(user_id, key_type.lower(), purchase_event)
+        new_balances = add_key_to_player(user_id, key_type, purchase_event)
         
         logger.info(
-            f"Key purchased: {key_type} by user {user_id}",
-            context={"tx_hash": purchase_event['tx_hash'], "wallet": wallet_address}
+            f"Key purchased successfully: {key_type}",
+            context={
+                "tx_hash": tx_hash,
+                "wallet": wallet_address,
+                "user_id": user_id,
+                "new_balances": new_balances
+            }
         )
         
         return APIResponse.success({
             "ok": True,
-            "key_type": key_type.lower(),
+            "key_type": key_type,
             "new_balances": new_balances,
-            "tx_hash": purchase_event['tx_hash'],
-            "message": "purchase_confirmed_mock"
+            "tx_hash": tx_hash,
+            "message": "Key purchased successfully with verified SOMI payment"
         }, status_code=201, origin=origin)
         
     except ValidationError as e:
         return APIResponse.validation_error(e.field, e.message, get_origin(event))
     except Exception as e:
         logger.error(f"Key purchase error: {str(e)}", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
         return APIResponse.server_error(origin=get_origin(event))
 
 

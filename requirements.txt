@@ -11,6 +11,9 @@ cryptography>=42.0.0
 web3>=6.15.0
 eth-account>=0.11.0
 
+# HTTP requests for RPC calls
+requests>=2.31.0
+
 # Email (optional - uncomment if using SendGrid)
 # sendgrid>=6.11.0
 
