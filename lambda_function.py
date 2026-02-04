@@ -1462,14 +1462,16 @@ def handle_key_purchase(event, context, user_id):
     
     try:
         origin = get_origin(event)
+        request_id = getattr(context, "aws_request_id", None) or get_request_id(event)
         body = validate_request_body(event.get('body'))
         
-        def build_message_response(message, status_code=400, request_id=None):
+        def build_message_response(message, status_code=400, request_id_override=None):
             headers = SecurityHeaders.get_headers(origin)
             headers["Content-Type"] = "application/json"
             body = {"message": message}
-            if request_id:
-                body["request_id"] = request_id
+            request_id_value = request_id_override or request_id
+            if request_id_value:
+                body["request_id"] = request_id_value
             return {
                 "statusCode": status_code,
                 "headers": headers,
@@ -1535,7 +1537,7 @@ def handle_key_purchase(event, context, user_id):
         # Verify transaction on Somnia mainnet
         try:
             verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, wallet_address)
-        except ValueError as e:
+        except (ValueError, KeyError, AssertionError) as e:
             reason = str(e)
             print("[Keys] verify failed:", {"key_type": key_type, "tx": tx_hash[:12], "reason": reason})
             logger.warning(
@@ -1643,13 +1645,14 @@ def handle_key_purchase(event, context, user_id):
         reason = e.message
         log_rejected(reason)
         return build_message_response(reason, status_code=400)
+    except (ValueError, KeyError, AssertionError) as e:
+        reason = str(e)
+        log_rejected(reason)
+        return build_message_response(reason, status_code=400)
     except Exception as e:
-        request_id = get_request_id(event)
-        print("[Keys] purchase error:", {
-            "key_type": key_type if 'key_type' in locals() else None,
-            "tx": (tx_hash[:12] if 'tx_hash' in locals() else None),
-            "err": str(e)[:180],
-            "request_id": request_id
+        print("[Keys] purchase crash:", {
+            "request_id": request_id,
+            "error": repr(e)
         })
         logger.error(
             f"Key purchase error: {str(e)}",
@@ -1657,7 +1660,7 @@ def handle_key_purchase(event, context, user_id):
             user_id=user_id,
             context={"tx_hash": tx_hash if 'tx_hash' in locals() else None}
         )
-        return build_message_response("Internal error", status_code=500, request_id=request_id)
+        return build_message_response("Internal error", status_code=500, request_id_override=request_id)
 
 
 @require_auth()
