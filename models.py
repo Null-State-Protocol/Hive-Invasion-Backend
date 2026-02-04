@@ -456,8 +456,10 @@ def add_key_to_player(user_id, key_type, purchase_event):
             Key={'user_id': user_id},
             UpdateExpression=(
                 'SET '
+                'keys_owned = if_not_exists(keys_owned, :empty_map), '
+                'tx_index = if_not_exists(tx_index, :empty_map), '
                 'keys_owned.#k = if_not_exists(keys_owned.#k, :zero) + :inc, '
-                'key_purchase_history = list_append(:new_event, if_not_exists(key_purchase_history, :empty_list)), '
+                'key_purchase_history = list_append(if_not_exists(key_purchase_history, :empty_list), :new_event), '
                 'tx_index.#tx = :true, '
                 'updated_at = :now'
             ),
@@ -471,6 +473,7 @@ def add_key_to_player(user_id, key_type, purchase_event):
                 ':zero': Decimal(0),
                 ':new_event': [purchase_event],
                 ':empty_list': [],
+                ':empty_map': {},
                 ':true': True,
                 ':now': now
             },
