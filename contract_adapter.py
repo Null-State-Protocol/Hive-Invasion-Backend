@@ -10,6 +10,18 @@ from datetime import datetime, timezone
 from logger import logger
 
 
+class VerifyErrorCodes:
+    RPC_UNREACHABLE = "RPC_UNREACHABLE"
+    RECEIPT_NOT_FOUND = "RECEIPT_NOT_FOUND"
+    RECEIPT_MISSING_BLOCK = "RECEIPT_MISSING_BLOCK"
+    TX_FAILED_ONCHAIN = "TX_FAILED_ONCHAIN"
+    TX_NOT_FOUND = "TX_NOT_FOUND"
+    TO_MISMATCH = "TO_MISMATCH"
+    FROM_MISMATCH = "FROM_MISMATCH"
+    VALUE_MISMATCH = "VALUE_MISMATCH"
+    RPC_ERROR = "RPC_ERROR"
+
+
 class ContractAdapter:
     """
     Somnia payment verification adapter.
@@ -23,6 +35,8 @@ class ContractAdapter:
     SOMNIA_RPC_MAINNET = os.environ.get("SOMNIA_RPC_MAINNET", "https://api.infra.mainnet.somnia.network/")
     SOMNIA_CHAIN_ID_MAINNET = 5031
     SOMNIA_CHAIN_ID_TESTNET = 50312
+
+    _CONFIG_LOGGED = False
     
     # Key prices in Wei (1 SOMI = 10^18 Wei)
     PRICE_WEI = {
@@ -31,6 +45,12 @@ class ContractAdapter:
         "gold": 1000000000000000000     # 1.0 SOMI
     }
     
+    @staticmethod
+    def log_config_once():
+        if not ContractAdapter._CONFIG_LOGGED:
+            print(f"[Config] Loaded: true {ContractAdapter.TREASURY_WALLET}")
+            ContractAdapter._CONFIG_LOGGED = True
+
     @staticmethod
     def get_expected_price(key_type):
         """Get price in Wei for key type"""
@@ -85,27 +105,15 @@ class ContractAdapter:
                 raise ValueError(str(e))
 
             if receipt is None:
-                logger.warning(
-                    f"Transaction not found or pending: {tx_hash}",
-                    context={"reason": "receipt_not_found"}
-                )
-                raise ValueError("RECEIPT_NOT_FOUND")
+                raise ValueError(VerifyErrorCodes.RECEIPT_NOT_FOUND)
 
             # Check receipt status (1 = success, 0 = failed)
             status = receipt.get("status")
             if status != "0x1":
-                logger.warning(
-                    f"Transaction failed on-chain: {tx_hash}",
-                    context={"status": status}
-                )
-                raise ValueError("TX_FAILED_ONCHAIN")
+                raise ValueError(VerifyErrorCodes.TX_FAILED_ONCHAIN)
 
             if not receipt.get("blockNumber"):
-                logger.warning(
-                    f"Receipt missing blockNumber: {tx_hash}",
-                    context={"reason": "missing_block"}
-                )
-                raise ValueError("RECEIPT_MISSING_BLOCK")
+                raise ValueError(VerifyErrorCodes.RECEIPT_MISSING_BLOCK)
 
             # Get full transaction details
             try:
@@ -114,17 +122,13 @@ class ContractAdapter:
                 raise ValueError(str(e))
 
             if tx is None:
-                raise ValueError("TX_NOT_FOUND")
+                raise ValueError(VerifyErrorCodes.TX_NOT_FOUND)
 
             # Validate recipient (must be our treasury wallet)
             tx_to = (tx.get("to") or "").lower()
 
             if tx_to != treasury:
-                logger.warning(
-                    f"Wrong recipient: {tx_to}, expected {treasury}",
-                    context={"tx_hash": tx_hash}
-                )
-                raise ValueError(f"TO_MISMATCH expected={treasury} got={tx_to}")
+                raise ValueError(f"{VerifyErrorCodes.TO_MISMATCH} expected={treasury} got={tx_to}")
 
             # Validate sender (must match user's linked wallet)
             if expected_from_wallet:
@@ -132,21 +136,13 @@ class ContractAdapter:
                 expected_from = expected_from_wallet.lower()
 
                 if tx_from != expected_from:
-                    logger.warning(
-                        f"Wrong sender: {tx_from}, expected {expected_from}",
-                        context={"tx_hash": tx_hash}
-                    )
-                    raise ValueError(f"FROM_MISMATCH expected={expected_from} got={tx_from}")
+                    raise ValueError(f"{VerifyErrorCodes.FROM_MISMATCH} expected={expected_from} got={tx_from}")
 
             # Validate amount
             tx_value = int(tx.get("value", "0x0"), 16)  # Convert hex to int
 
             if tx_value != expected_price:
-                logger.warning(
-                    f"Wrong amount: {tx_value} Wei, expected {expected_price}",
-                    context={"tx_hash": tx_hash, "key_type": key_type}
-                )
-                raise ValueError(f"VALUE_MISMATCH expected={expected_price} got={tx_value}")
+                raise ValueError(f"{VerifyErrorCodes.VALUE_MISMATCH} expected={expected_price} got={tx_value}")
 
             return {
                 "verified": True,
@@ -162,7 +158,6 @@ class ContractAdapter:
             }
 
         except Exception as e:
-            logger.warning(f"Transaction verification error: {str(e)}")
             raise
     
     @staticmethod
@@ -198,7 +193,7 @@ class ContractAdapter:
             return data.get("result")  # None if pending, dict if found
             
         except requests.exceptions.RequestException:
-            raise ValueError("RPC_UNREACHABLE")
+            raise ValueError(VerifyErrorCodes.RPC_UNREACHABLE)
     
     @staticmethod
     def _get_transaction(tx_hash):
@@ -227,13 +222,13 @@ class ContractAdapter:
             if data.get("error"):
                 err = data.get("error") or {}
                 code = err.get("code", "unknown")
-                message = err.get("message", "RPC_ERROR")
-                raise ValueError(f"RPC_ERROR {code}: {message}")
+                message = err.get("message", VerifyErrorCodes.RPC_ERROR)
+                raise ValueError(f"{VerifyErrorCodes.RPC_ERROR} {code}: {message}")
             
             return data.get("result")
             
         except requests.exceptions.RequestException:
-            raise ValueError("RPC_UNREACHABLE")
+            raise ValueError(VerifyErrorCodes.RPC_UNREACHABLE)
     
     @staticmethod
     def generate_mock_tx_hash():
@@ -267,15 +262,9 @@ class ContractAdapter:
                 "source": "mock_contract"
             }
             
-            logger.info(
-                f"Mock key purchase (deprecated): {key_type}",
-                context={"tx_hash": tx_hash}
-            )
-            
             return True, purchase_event, None
             
         except Exception as e:
-            logger.error(f"Mock purchase error: {str(e)}", error=e)
             return False, None, "Purchase simulation failed"
     
     @staticmethod

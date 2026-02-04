@@ -1419,13 +1419,18 @@ def handle_keys(event, context, method, path, origin):
     
     Routes:
     - POST /keys/purchase
+    - POST /keys/replay
     - GET /keys/owned
     - GET /keys/history
     """
     try:
-        # POST /keys/purchase - Purchase a key (mock contract)
+        # POST /keys/purchase - Purchase a key (Somnia)
         if path == 'keys/purchase' and method == 'POST':
             return handle_key_purchase(event, context)
+
+        # POST /keys/replay - Replay purchase by tx_hash (admin)
+        elif path == 'keys/replay' and method == 'POST':
+            return handle_key_replay(event, context)
         
         # GET /keys/owned - Get owned keys
         elif path == 'keys/owned' and method == 'GET':
@@ -1464,6 +1469,15 @@ def handle_key_purchase(event, context, user_id):
         origin = get_origin(event)
         request_id = getattr(context, "aws_request_id", None) or get_request_id(event)
         body = validate_request_body(event.get('body'))
+
+        def log_fail(reason, tx_hash_value=None):
+            tx_prefix = (tx_hash_value or "")[:12]
+            code = (str(reason).split()[0] if reason else "UNKNOWN")
+            print("[Keys] FAIL", {"code": code, "reason": str(reason), "tx_prefix": tx_prefix})
+
+        def log_success(tx_hash_value, key_type_value):
+            tx_prefix = (tx_hash_value or "")[:12]
+            print("[Keys] SUCCESS", {"user_id": user_id, "key_type": key_type_value, "tx_prefix": tx_prefix})
         
         def build_message_response(message, status_code=400, request_id_override=None):
             headers = SecurityHeaders.get_headers(origin)
@@ -1478,12 +1492,10 @@ def handle_key_purchase(event, context, user_id):
                 "body": json.dumps(body)
             }
 
-        def log_rejected(reason):
-            print("[Keys] purchase rejected:", {
-                "tx": tx_hash[:12] if 'tx_hash' in locals() else None,
-                "key_type": key_type if 'key_type' in locals() else None,
-                "reason": reason
-            })
+        # Kill-switch
+        import os
+        if os.getenv("KEY_PURCHASE_ENABLED", "true").lower() != "true":
+            return build_message_response("PURCHASE_DISABLED", status_code=503)
 
         # Validate inputs
         key_type = Validator.required(body, 'key_type')
@@ -1493,7 +1505,7 @@ def handle_key_purchase(event, context, user_id):
         key_type = key_type.lower()
         if key_type not in {"bronze", "silver", "gold"}:
             reason = f"Invalid key type: {key_type}"
-            log_rejected(reason)
+            log_fail(reason)
             return build_message_response(reason, status_code=400)
         
         # Normalize and validate tx_hash
@@ -1502,7 +1514,7 @@ def handle_key_purchase(event, context, user_id):
             tx_hash = "0x" + tx_hash
         if not re.fullmatch(r"0x[a-fA-F0-9]{64}", tx_hash):
             reason = "TX_HASH_INVALID"
-            log_rejected(reason)
+            log_fail(reason, tx_hash)
             return build_message_response(reason, status_code=400)
         
         # Verify user has a linked wallet
@@ -1520,19 +1532,22 @@ def handle_key_purchase(event, context, user_id):
         # Ensure wallet is linked
         if not wallet_address:
             reason = "No wallet linked. Please connect your wallet first."
-            log_rejected(reason)
+            log_fail(reason, tx_hash)
             return build_message_response(reason, status_code=400)
         if not re.fullmatch(r"0x[a-fA-F0-9]{40}", wallet_address):
             reason = "Invalid wallet address"
-            log_rejected(reason)
+            log_fail(reason, tx_hash)
             return build_message_response(reason, status_code=400)
         
+        # Log config once
+        ContractAdapter.log_config_once()
+
         # Verify transaction on Somnia mainnet
         try:
             verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, wallet_address)
         except (ValueError, KeyError, AssertionError) as e:
             reason = str(e)
-            print("[Keys] verify fail:", {"tx": tx_hash[:12], "reason": reason})
+            log_fail(reason, tx_hash)
             return build_message_response(reason, status_code=400)
         
         if not verification.get("verified"):
@@ -1553,27 +1568,10 @@ def handle_key_purchase(event, context, user_id):
                 }, status_code=202, origin=origin)
             
             # Failed verification (wrong amount, wrong recipient, etc)
-            print("[Keys] verify fail:", {"tx": tx_hash[:12], "reason": reason})
+            log_fail(reason, tx_hash)
             return build_message_response(reason, status_code=400)
         
         tx_data = verification.get("tx_data", {})
-        if tx_data:
-            print("[Keys] verify ok:", {
-                "key_type": key_type,
-                "tx": tx_hash[:12],
-                "from": (tx_data.get("from") or "")[:10],
-                "to": (tx_data.get("to") or "")[:10]
-            })
-            logger.info(
-                "SOMI verification data",
-                context={
-                    "tx_hash": tx_hash[:12],
-                    "to": tx_data.get("to"),
-                    "from": tx_data.get("from"),
-                    "value": tx_data.get("value"),
-                    "status": tx_data.get("status")
-                }
-            )
         
         # Transaction verified! Create purchase event
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -1594,10 +1592,6 @@ def handle_key_purchase(event, context, user_id):
             new_balances = add_key_to_player(user_id, key_type, purchase_event)
         except Exception as e:
             if "already processed" in str(e):
-                logger.warning(
-                    f"Duplicate transaction attempt: {tx_hash}",
-                    context={"user_id": user_id}
-                )
                 return APIResponse.error(
                     "This transaction has already been processed. Duplicate purchase rejected.",
                     status_code=409,
@@ -1605,18 +1599,10 @@ def handle_key_purchase(event, context, user_id):
                     origin=origin
                 )
             reason = str(e)
-            print("[Keys] db write fail:", {"tx": tx_hash[:12], "reason": reason})
+            log_fail(reason, tx_hash)
             return build_message_response(f"DB_WRITE_FAILED ({reason})", status_code=400)
         
-        logger.info(
-            f"Key purchased successfully: {key_type}",
-            context={
-                "tx_hash": tx_hash,
-                "wallet": wallet_address,
-                "user_id": user_id,
-                "new_balances": new_balances
-            }
-        )
+        log_success(tx_hash, key_type)
         
         return APIResponse.success({
             "ok": True,
@@ -1624,20 +1610,166 @@ def handle_key_purchase(event, context, user_id):
             "new_balances": new_balances,
             "tx_hash": tx_hash,
             "message": "Key purchased successfully with verified SOMI payment on Somnia mainnet"
-        }, status_code=201, origin=origin)
+        }, status_code=200, origin=origin)
         
     except ValidationError as e:
         reason = e.message
-        log_rejected(reason)
+        log_fail(reason)
         return build_message_response(reason, status_code=400)
     except (ValueError, KeyError, AssertionError) as e:
         reason = str(e)
-        log_rejected(reason)
+        log_fail(reason)
         return build_message_response(reason, status_code=400)
     except Exception as e:
         reason = f"UNEXPECTED_ERROR ({str(e)})"
-        print("[Keys] purchase error:", {"tx": tx_hash[:12] if 'tx_hash' in locals() else None, "reason": reason})
+        log_fail(reason, tx_hash if 'tx_hash' in locals() else None)
         return build_message_response(reason, status_code=400)
+
+
+def handle_key_replay(event, context):
+    """POST /keys/replay - Replay a key purchase by tx_hash (admin only)"""
+    from contract_adapter import ContractAdapter
+    from models import add_key_to_player
+    from validation import Validator
+    from datetime import datetime, timezone
+    import re
+    import json
+    import os
+    import boto3
+    from security import SecurityHeaders
+
+    origin = get_origin(event)
+    request_id = getattr(context, "aws_request_id", None) or get_request_id(event)
+    body = validate_request_body(event.get('body'))
+
+    def build_message_response(message, status_code=400):
+        headers = SecurityHeaders.get_headers(origin)
+        headers["Content-Type"] = "application/json"
+        payload = {"message": message}
+        if request_id:
+            payload["request_id"] = request_id
+        return {
+            "statusCode": status_code,
+            "headers": headers,
+            "body": json.dumps(payload)
+        }
+
+    def log_fail(reason, tx_hash_value=None):
+        tx_prefix = (tx_hash_value or "")[:12]
+        code = (str(reason).split()[0] if reason else "UNKNOWN")
+        print("[Keys] FAIL", {"code": code, "reason": str(reason), "tx_prefix": tx_prefix})
+
+    def log_success(tx_hash_value, key_type_value, user_id_value):
+        tx_prefix = (tx_hash_value or "")[:12]
+        print("[Keys] SUCCESS", {"user_id": user_id_value, "key_type": key_type_value, "tx_prefix": tx_prefix})
+
+    # Kill-switch
+    if os.getenv("KEY_PURCHASE_ENABLED", "true").lower() != "true":
+        return build_message_response("PURCHASE_DISABLED", status_code=503)
+
+    # Admin auth
+    auth_header = (event.get("headers") or {}).get("Authorization", "") or (event.get("headers") or {}).get("authorization", "")
+    replay_secret = (event.get("headers") or {}).get("X-Replay-Secret", "") or (event.get("headers") or {}).get("x-replay-secret", "")
+    admin_token = os.getenv("REPLAY_ADMIN_TOKEN", "")
+    secret_token = os.getenv("REPLAY_SECRET", "")
+
+    is_admin_bearer = auth_header.startswith("Bearer ") and admin_token and auth_header.split(" ", 1)[1].strip() == admin_token
+    is_admin_secret = bool(secret_token) and replay_secret == secret_token
+    if not (is_admin_bearer or is_admin_secret):
+        return build_message_response("REPLAY_UNAUTHORIZED", status_code=403)
+
+    # Validate input
+    tx_hash = Validator.required(body, 'tx_hash')
+    tx_hash = tx_hash.strip()
+    if not tx_hash.startswith("0x"):
+        tx_hash = "0x" + tx_hash
+    if not re.fullmatch(r"0x[a-fA-F0-9]{64}", tx_hash):
+        log_fail("TX_HASH_INVALID", tx_hash)
+        return build_message_response("TX_HASH_INVALID", status_code=400)
+
+    # Log config once
+    ContractAdapter.log_config_once()
+
+    # Fetch transaction to determine sender and key_type
+    try:
+        tx = ContractAdapter._get_transaction(tx_hash)
+    except Exception as e:
+        reason = str(e)
+        log_fail(reason, tx_hash)
+        return build_message_response(reason, status_code=400)
+
+    if not tx:
+        log_fail("TX_NOT_FOUND", tx_hash)
+        return build_message_response("TX_NOT_FOUND", status_code=400)
+
+    tx_from = (tx.get("from") or "").lower()
+    tx_value = int(tx.get("value", "0x0"), 16)
+
+    key_type = None
+    for k, v in ContractAdapter.PRICE_WEI.items():
+        if int(v) == int(tx_value):
+            key_type = k
+            break
+
+    if not key_type:
+        log_fail(f"VALUE_MISMATCH expected={ContractAdapter.PRICE_WEI} got={tx_value}", tx_hash)
+        return build_message_response("VALUE_MISMATCH", status_code=400)
+
+    # Lookup user by wallet
+    dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+    wallets_table = dynamodb.Table(config.TABLE_USER_WALLETS)
+    wallet_response = wallets_table.get_item(Key={"wallet_address": tx_from})
+
+    if 'Item' not in wallet_response:
+        log_fail("USER_NOT_FOUND", tx_hash)
+        return build_message_response("USER_NOT_FOUND", status_code=404)
+
+    user_id = wallet_response['Item']['user_id']
+
+    # Verify transaction fully and write
+    try:
+        verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, tx_from)
+    except (ValueError, KeyError, AssertionError) as e:
+        reason = str(e)
+        log_fail(reason, tx_hash)
+        return build_message_response(reason, status_code=400)
+
+    if not verification.get("verified"):
+        reason = verification.get("reason", "Unknown error")
+        log_fail(reason, tx_hash)
+        return build_message_response(reason, status_code=400)
+
+    purchase_event = {
+        "event_id": tx_hash,
+        "tx_hash": tx_hash,
+        "key_type": key_type,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "from_wallet": tx_from,
+        "to_wallet": ContractAdapter.TREASURY_WALLET.lower(),
+        "amount_wei": str(ContractAdapter.get_expected_price(key_type)),
+        "status": "confirmed"
+    }
+
+    try:
+        new_balances = add_key_to_player(user_id, key_type, purchase_event)
+    except Exception as e:
+        if "already processed" in str(e):
+            return APIResponse.success({
+                "ok": True,
+                "already_processed": True,
+                "tx_hash": tx_hash
+            }, status_code=200, origin=origin)
+        reason = str(e)
+        log_fail(reason, tx_hash)
+        return build_message_response(f"DB_WRITE_FAILED ({reason})", status_code=400)
+
+    log_success(tx_hash, key_type, user_id)
+    return APIResponse.success({
+        "ok": True,
+        "tx_hash": tx_hash,
+        "key_type": key_type,
+        "new_balances": new_balances
+    }, status_code=200, origin=origin)
 
 
 @require_auth()

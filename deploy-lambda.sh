@@ -139,6 +139,9 @@ aws lambda update-function-configuration \
         JWT_REFRESH_TOKEN_EXPIRE_DAYS=30,
         ENVIRONMENT=production,
         LOG_LEVEL=INFO,
+        KEY_PURCHASE_ENABLED=true,
+        REPLAY_SECRET=${REPLAY_SECRET},
+        REPLAY_ADMIN_TOKEN=${REPLAY_ADMIN_TOKEN},
         SOMNIA_RPC_MAINNET=https://api.infra.mainnet.somnia.network/,
         SOMNIA_TREASURY_WALLET=0xEbD49456f4b448E9455bDD89B42e7EFD24567D60
     }" \
