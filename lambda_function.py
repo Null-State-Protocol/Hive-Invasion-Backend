@@ -1576,15 +1576,13 @@ def handle_key_purchase(event, context, user_id):
         # Transaction verified! Create purchase event
         timestamp = datetime.now(timezone.utc).isoformat()
         
+        from decimal import Decimal
+        somi_value = str((Decimal(ContractAdapter.get_expected_price(key_type)) / Decimal(10**18)).normalize())
         purchase_event = {
-            "event_id": tx_hash,  # Use tx_hash as event_id for unique identification
             "tx_hash": tx_hash,
             "key_type": key_type,
-            "timestamp": timestamp,
-            "from_wallet": wallet_address,
-            "to_wallet": ContractAdapter.TREASURY_WALLET.lower(),
-            "amount_wei": str(ContractAdapter.get_expected_price(key_type)),
-            "status": "confirmed"
+            "somi_value": somi_value,
+            "timestamp": timestamp
         }
         
         # Update player's key ownership with idempotency guard
@@ -1739,15 +1737,13 @@ def handle_key_replay(event, context):
         log_fail(reason, tx_hash)
         return build_message_response(reason, status_code=400)
 
+    from decimal import Decimal
+    somi_value = str((Decimal(ContractAdapter.get_expected_price(key_type)) / Decimal(10**18)).normalize())
     purchase_event = {
-        "event_id": tx_hash,
         "tx_hash": tx_hash,
         "key_type": key_type,
-        "timestamp": datetime.now(timezone.utc).isoformat(),
-        "from_wallet": tx_from,
-        "to_wallet": ContractAdapter.TREASURY_WALLET.lower(),
-        "amount_wei": str(ContractAdapter.get_expected_price(key_type)),
-        "status": "confirmed"
+        "somi_value": somi_value,
+        "timestamp": datetime.now(timezone.utc).isoformat()
     }
 
     try:
@@ -1827,10 +1823,18 @@ def handle_keys_history(event, context, user_id):
         
         # Get purchase history
         history = get_key_purchase_history(user_id, limit)
-        
+
+        allowed = {"key_type", "somi_value", "tx_hash", "timestamp"}
+        sanitized = []
+        for item in history:
+            if isinstance(item, dict):
+                sanitized.append({k: item.get(k) for k in allowed if k in item})
+            else:
+                sanitized.append({})
+
         return APIResponse.success({
-            "history": history,
-            "count": len(history)
+            "history": sanitized,
+            "count": len(sanitized)
         }, origin=origin)
         
     except Exception as e:
