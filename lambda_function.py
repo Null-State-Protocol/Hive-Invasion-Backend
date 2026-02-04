@@ -1508,6 +1508,13 @@ def handle_key_purchase(event, context, user_id):
                 error_code="WALLET_NOT_LINKED",
                 origin=origin
             )
+        if not re.fullmatch(r"0x[a-fA-F0-9]{40}", wallet_address):
+            return APIResponse.error(
+                "Invalid wallet address",
+                status_code=400,
+                error_code="INVALID_WALLET_ADDRESS",
+                origin=origin
+            )
         
         tx_hash_short = f"{tx_hash[:10]}...{tx_hash[-6:]}" if tx_hash else ""
         wallet_short = f"{wallet_address[:10]}...{wallet_address[-6:]}" if wallet_address else ""
@@ -1529,6 +1536,19 @@ def handle_key_purchase(event, context, user_id):
                 f"Transaction verification failed: {str(e)}",
                 status_code=400,
                 error_code="TX_VERIFICATION_FAILED_INVALID",
+                origin=origin
+            )
+        except Exception as e:
+            print("[Keys] verify failed:", {"key_type": key_type, "tx": tx_hash[:12], "reason": str(e)})
+            logger.error(
+                f"Transaction verification error: {tx_hash_short}",
+                error=e,
+                user_id=user_id
+            )
+            return APIResponse.error(
+                f"Verification error: {str(e)}",
+                status_code=400,
+                error_code="TX_VERIFICATION_FAILED_ERROR",
                 origin=origin
             )
         
