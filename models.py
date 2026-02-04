@@ -435,6 +435,19 @@ def add_key_to_player(user_id, key_type, purchase_event):
     table = dynamodb.Table('hive_player_data')
     tx_hash = purchase_event.get('tx_hash', '')
 
+    # Validate existing attribute types to avoid invalid path errors
+    existing = table.get_item(
+        Key={'user_id': user_id},
+        ProjectionExpression='keys_owned, key_purchase_history, tx_index'
+    ).get('Item', {})
+
+    if 'tx_index' in existing and not isinstance(existing.get('tx_index'), dict):
+        raise Exception('TX_INDEX_TYPE_INVALID')
+    if 'keys_owned' in existing and not isinstance(existing.get('keys_owned'), dict):
+        raise Exception('KEYS_OWNED_TYPE_INVALID')
+    if 'key_purchase_history' in existing and not isinstance(existing.get('key_purchase_history'), list):
+        raise Exception('HISTORY_TYPE_INVALID')
+
     # Atomic update: increment key, append history, and set tx_index in one write
     now = datetime.now(timezone.utc).isoformat()
 
