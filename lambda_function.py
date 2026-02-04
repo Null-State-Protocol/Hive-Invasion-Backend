@@ -1660,13 +1660,23 @@ def handle_key_purchase(event, context, user_id):
     except ValidationError as e:
         return APIResponse.validation_error(e.field, e.message, get_origin(event))
     except Exception as e:
+        print("[Keys] purchase error:", {
+            "key_type": key_type if 'key_type' in locals() else None,
+            "tx": (tx_hash[:12] if 'tx_hash' in locals() else None),
+            "err": str(e)[:180]
+        })
         logger.error(
             f"Key purchase error: {str(e)}",
             error=e,
             user_id=user_id,
             context={"tx_hash": tx_hash if 'tx_hash' in locals() else None}
         )
-        return APIResponse.server_error(origin=origin)
+        return APIResponse.error(
+            "Unexpected verify error",
+            status_code=400,
+            error_code="TX_VERIFICATION_FAILED_UNEXPECTED",
+            origin=origin
+        )
 
 
 @require_auth()
