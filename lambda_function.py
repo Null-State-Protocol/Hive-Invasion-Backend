@@ -1456,6 +1456,7 @@ def handle_key_purchase(event, context, user_id):
     from validation import Validator
     from datetime import datetime, timezone
     import uuid
+    import re
     
     try:
         origin = get_origin(event)
@@ -1467,6 +1468,25 @@ def handle_key_purchase(event, context, user_id):
         
         # Normalize key_type
         key_type = key_type.lower()
+        if key_type not in {"bronze", "silver", "gold"}:
+            return APIResponse.error(
+                f"Invalid key type: {key_type}",
+                status_code=400,
+                error_code="INVALID_KEY_TYPE",
+                origin=origin
+            )
+        
+        # Normalize and validate tx_hash
+        tx_hash = tx_hash.strip()
+        if not tx_hash.startswith("0x"):
+            tx_hash = "0x" + tx_hash
+        if not re.fullmatch(r"0x[a-fA-F0-9]{64}", tx_hash):
+            return APIResponse.error(
+                "Invalid tx_hash format",
+                status_code=400,
+                error_code="INVALID_TX_HASH",
+                origin=origin
+            )
         
         # Verify user has a linked wallet
         import boto3
@@ -1500,6 +1520,7 @@ def handle_key_purchase(event, context, user_id):
         try:
             verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, wallet_address)
         except ValueError as e:
+            print("[Keys] verify failed:", {"key_type": key_type, "tx": tx_hash[:12], "reason": str(e)})
             logger.warning(
                 f"Transaction verification failed: {tx_hash_short}",
                 context={"reason": str(e), "user_id": user_id}
@@ -1542,6 +1563,12 @@ def handle_key_purchase(event, context, user_id):
         
         tx_data = verification.get("tx_data", {})
         if tx_data:
+            print("[Keys] verify ok:", {
+                "key_type": key_type,
+                "tx": tx_hash[:12],
+                "from": (tx_data.get("from") or "")[:10],
+                "to": (tx_data.get("to") or "")[:10]
+            })
             logger.info(
                 "SOMI verification data",
                 context={

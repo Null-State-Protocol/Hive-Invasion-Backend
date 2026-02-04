@@ -72,6 +72,8 @@ class ContractAdapter:
             
             # Normalize tx_hash
             tx_hash = tx_hash.strip()
+            if not tx_hash:
+                raise ValueError("Empty tx_hash")
             if not tx_hash.startswith("0x"):
                 tx_hash = "0x" + tx_hash
             
@@ -82,7 +84,7 @@ class ContractAdapter:
             )
             
             try:
-                receipt = ContractAdapter._get_transaction_receipt(tx_hash)
+                    receipt = ContractAdapter._get_transaction_receipt(tx_hash)
             except ValueError as e:
                 raise ValueError(f"RPC error: {e}")
             
@@ -111,8 +113,8 @@ class ContractAdapter:
                 tx = ContractAdapter._get_transaction(tx_hash)
             except ValueError as e:
                 raise ValueError(f"RPC error: {e}")
-            if tx is None:
-                raise ValueError("Could not retrieve transaction details")
+                if tx is None:
+                    raise ValueError("Could not retrieve transaction details")
             
             # Validate recipient (must be our treasury wallet)
             tx_to = (tx.get("to") or "").lower()
