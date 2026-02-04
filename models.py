@@ -6,6 +6,7 @@ from dataclasses import dataclass, asdict
 from datetime import datetime, timezone, timedelta
 from typing import Dict, List, Optional
 from decimal import Decimal
+from logger import logger
 
 
 @dataclass
