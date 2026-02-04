@@ -135,6 +135,22 @@ class ContractAdapter:
                     "reason": f"Recipient mismatch: received {tx_to}, expected {treasury}"
                 }
             
+            # Validate sender (must match user's linked wallet)
+            if expected_from_wallet:
+                tx_from = (tx.get("from") or "").lower()
+                expected_from = expected_from_wallet.lower()
+                
+                if tx_from != expected_from:
+                    logger.warning(
+                        f"Wrong sender: {tx_from}, expected {expected_from}",
+                        context={"tx_hash": tx_hash}
+                    )
+                    return {
+                        "verified": False,
+                        "status": "invalid",
+                        "reason": f"Sender mismatch: tx sent from {tx_from}, but user wallet is {expected_from}"
+                    }
+            
             # Validate amount
             tx_value = int(tx.get("value", "0x0"), 16)  # Convert hex to int
             
