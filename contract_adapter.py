@@ -66,11 +66,7 @@ class ContractAdapter:
         try:
             # Validate key type
             if key_type.lower() not in ContractAdapter.PRICE_WEI:
-                return {
-                    "verified": False,
-                    "status": "invalid",
-                    "reason": f"Invalid key type: {key_type}"
-                }
+                raise ValueError(f"Invalid key type: {key_type}")
             
             expected_price = ContractAdapter.get_expected_price(key_type)
             
@@ -85,7 +81,10 @@ class ContractAdapter:
                 context={"rpc": ContractAdapter.SOMNIA_RPC_MAINNET}
             )
             
-            receipt = ContractAdapter._get_transaction_receipt(tx_hash)
+            try:
+                receipt = ContractAdapter._get_transaction_receipt(tx_hash)
+            except ValueError as e:
+                raise ValueError(f"RPC error: {e}")
             
             if receipt is None:
                 logger.warning(
@@ -105,20 +104,15 @@ class ContractAdapter:
                     f"Transaction failed on-chain: {tx_hash}",
                     context={"status": status}
                 )
-                return {
-                    "verified": False,
-                    "status": "failed",
-                    "reason": f"Transaction failed on-chain (status: {status})"
-                }
+                raise ValueError(f"Transaction failed on-chain (status: {status})")
             
             # Get full transaction details
-            tx = ContractAdapter._get_transaction(tx_hash)
+            try:
+                tx = ContractAdapter._get_transaction(tx_hash)
+            except ValueError as e:
+                raise ValueError(f"RPC error: {e}")
             if tx is None:
-                return {
-                    "verified": False,
-                    "status": "invalid",
-                    "reason": "Could not retrieve transaction details"
-                }
+                raise ValueError("Could not retrieve transaction details")
             
             # Validate recipient (must be our treasury wallet)
             tx_to = (tx.get("to") or "").lower()
@@ -129,11 +123,7 @@ class ContractAdapter:
                     f"Wrong recipient: {tx_to}, expected {treasury}",
                     context={"tx_hash": tx_hash}
                 )
-                return {
-                    "verified": False,
-                    "status": "invalid",
-                    "reason": f"Recipient mismatch: received {tx_to}, expected {treasury}"
-                }
+                raise ValueError(f"Recipient mismatch: received {tx_to}, expected {treasury}")
             
             # Validate sender (must match user's linked wallet)
             if expected_from_wallet:
@@ -145,11 +135,7 @@ class ContractAdapter:
                         f"Wrong sender: {tx_from}, expected {expected_from}",
                         context={"tx_hash": tx_hash}
                     )
-                    return {
-                        "verified": False,
-                        "status": "invalid",
-                        "reason": f"Sender mismatch: tx sent from {tx_from}, but user wallet is {expected_from}"
-                    }
+                    raise ValueError(f"Sender mismatch: tx sent from {tx_from}, but user wallet is {expected_from}")
             
             # Validate amount
             tx_value = int(tx.get("value", "0x0"), 16)  # Convert hex to int
@@ -159,11 +145,7 @@ class ContractAdapter:
                     f"Wrong amount: {tx_value} Wei, expected {expected_price}",
                     context={"tx_hash": tx_hash, "key_type": key_type}
                 )
-                return {
-                    "verified": False,
-                    "status": "invalid",
-                    "reason": f"Amount mismatch: received {tx_value} Wei, expected {expected_price} Wei"
-                }
+                raise ValueError(f"Amount mismatch: received {tx_value} Wei, expected {expected_price} Wei")
             
             # Validate chain ID (verify we're on Somnia mainnet)
             # Note: We could also check chainId from transaction if available
@@ -193,11 +175,7 @@ class ContractAdapter:
             
         except Exception as e:
             logger.error(f"Transaction verification error: {str(e)}", error=e)
-            return {
-                "verified": False,
-                "status": "invalid",
-                "reason": f"Verification error: {str(e)}"
-            }
+            raise
     
     @staticmethod
     def _get_transaction_receipt(tx_hash):
@@ -225,13 +203,13 @@ class ContractAdapter:
             data = response.json()
             if data.get("error"):
                 logger.warning(f"RPC error: {data.get('error')}")
-                return None
+                raise ValueError(data.get("error"))
             
             return data.get("result")  # None if pending, dict if found
             
         except requests.exceptions.RequestException as e:
             logger.error(f"RPC request error: {str(e)}", error=e)
-            return None
+            raise ValueError(str(e))
     
     @staticmethod
     def _get_transaction(tx_hash):
@@ -259,13 +237,13 @@ class ContractAdapter:
             data = response.json()
             if data.get("error"):
                 logger.warning(f"RPC error: {data.get('error')}")
-                return None
+                raise ValueError(data.get("error"))
             
             return data.get("result")
             
         except requests.exceptions.RequestException as e:
             logger.error(f"RPC request error: {str(e)}", error=e)
-            return None
+            raise ValueError(str(e))
     
     @staticmethod
     def generate_mock_tx_hash():

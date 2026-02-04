@@ -1489,13 +1489,27 @@ def handle_key_purchase(event, context, user_id):
                 origin=origin
             )
         
+        tx_hash_short = f"{tx_hash[:10]}...{tx_hash[-6:]}" if tx_hash else ""
+        wallet_short = f"{wallet_address[:10]}...{wallet_address[-6:]}" if wallet_address else ""
         logger.info(
             f"Starting SOMI payment verification: {key_type}",
-            context={"tx_hash": tx_hash, "wallet": wallet_address, "user_id": user_id}
+            context={"tx_hash": tx_hash_short, "wallet": wallet_short, "user_id": user_id}
         )
         
         # Verify transaction on Somnia mainnet
-        verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, wallet_address)
+        try:
+            verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, wallet_address)
+        except ValueError as e:
+            logger.warning(
+                f"Transaction verification failed: {tx_hash_short}",
+                context={"reason": str(e), "user_id": user_id}
+            )
+            return APIResponse.error(
+                f"Transaction verification failed: {str(e)}",
+                status_code=400,
+                error_code="TX_VERIFICATION_FAILED_INVALID",
+                origin=origin
+            )
         
         if not verification.get("verified"):
             status = verification.get("status")
@@ -1526,8 +1540,20 @@ def handle_key_purchase(event, context, user_id):
                 origin=origin
             )
         
-        # Transaction verified! Create purchase event
         tx_data = verification.get("tx_data", {})
+        if tx_data:
+            logger.info(
+                "SOMI verification data",
+                context={
+                    "tx_hash": tx_hash_short,
+                    "to": tx_data.get("to"),
+                    "from": tx_data.get("from"),
+                    "value": tx_data.get("value"),
+                    "status": tx_data.get("status")
+                }
+            )
+        
+        # Transaction verified! Create purchase event
         timestamp = datetime.now(timezone.utc).isoformat()
         
         purchase_event = {
@@ -1580,7 +1606,12 @@ def handle_key_purchase(event, context, user_id):
     except ValidationError as e:
         return APIResponse.validation_error(e.field, e.message, get_origin(event))
     except Exception as e:
-        logger.error(f"Key purchase error: {str(e)}", error=e, user_id=user_id)
+        logger.error(
+            f"Key purchase error: {str(e)}",
+            error=e,
+            user_id=user_id,
+            context={"tx_hash": tx_hash if 'tx_hash' in locals() else None}
+        )
         return APIResponse.server_error(origin=origin)
 
 
