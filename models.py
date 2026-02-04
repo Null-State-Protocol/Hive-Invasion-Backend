@@ -434,54 +434,51 @@ def add_key_to_player(user_id, key_type, purchase_event):
     
     table = dynamodb.Table('hive_player_data')
     tx_hash = purchase_event.get('tx_hash', '')
-    
-    # Get current ownership and history
-    response = table.get_item(Key={'user_id': user_id})
-    player_data = response.get('Item', {})
-    
-    current_keys = {
-        'bronze': int(player_data.get('keys_owned', {}).get('bronze', 0)),
-        'silver': int(player_data.get('keys_owned', {}).get('silver', 0)),
-        'gold': int(player_data.get('keys_owned', {}).get('gold', 0))
-    }
-    
-    # Increment the key count
-    current_keys[key_type] += 1
-    
-    # Get current purchase history (limit to last 100)
-    purchase_history = player_data.get('key_purchase_history', [])
-    purchase_history.insert(0, purchase_event)  # Most recent first
-    purchase_history = purchase_history[:100]  # Keep last 100
-    
-    # Build tx_index (map of tx_hash -> true for deduplication)
-    tx_index = player_data.get('tx_index', {})
-    
-    # Prepare update expression with idempotency guard
+
+    # Atomic update: increment key, append history, and set tx_index in one write
     now = datetime.now(timezone.utc).isoformat()
-    
+
     try:
-        table.update_item(
+        response = table.update_item(
             Key={'user_id': user_id},
-            UpdateExpression='SET keys_owned = :keys, key_purchase_history = :history, tx_index.#tx = :true, updated_at = :now',
+            UpdateExpression=(
+                'SET '
+                'keys_owned.#k = if_not_exists(keys_owned.#k, :zero) + :inc, '
+                'key_purchase_history = list_append(:new_event, if_not_exists(key_purchase_history, :empty_list)), '
+                'tx_index.#tx = :true, '
+                'updated_at = :now'
+            ),
             ConditionExpression='attribute_not_exists(tx_index.#tx)',
             ExpressionAttributeNames={
-                '#tx': tx_hash  # Use attribute name placeholder for tx_hash
+                '#k': key_type,
+                '#tx': tx_hash
             },
             ExpressionAttributeValues={
-                ':keys': current_keys,
-                ':history': purchase_history,
+                ':inc': Decimal(1),
+                ':zero': Decimal(0),
+                ':new_event': [purchase_event],
+                ':empty_list': [],
                 ':true': True,
                 ':now': now
-            }
+            },
+            ReturnValues='ALL_NEW'
         )
-        
+
+        attrs = response.get('Attributes', {})
+        keys_owned = attrs.get('keys_owned', {})
+        current_keys = {
+            'bronze': int(keys_owned.get('bronze', 0) or 0),
+            'silver': int(keys_owned.get('silver', 0) or 0),
+            'gold': int(keys_owned.get('gold', 0) or 0)
+        }
+
         logger.info(
             f"Key added to player with idempotency guard: {key_type}",
             context={"user_id": user_id, "tx_hash": tx_hash}
         )
-        
+
         return current_keys
-        
+
     except ClientError as e:
         if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
             logger.warning(
@@ -490,7 +487,9 @@ def add_key_to_player(user_id, key_type, purchase_event):
             )
             raise Exception(f"Transaction {tx_hash} already processed") from e
         else:
-            raise
+            code = e.response.get('Error', {}).get('Code', 'UnknownError')
+            message = e.response.get('Error', {}).get('Message', 'Unknown error')
+            raise Exception(f"DB_WRITE_FAILED ({code}: {message})") from e
 
 
 def check_tx_hash_processed(tx_hash):

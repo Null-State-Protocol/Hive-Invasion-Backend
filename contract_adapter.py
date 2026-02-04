@@ -79,23 +79,17 @@ class ContractAdapter:
 
             treasury = ContractAdapter.TREASURY_WALLET.lower()
 
-            # Call RPC to get transaction receipt
-            logger.info(
-                f"Verifying SOMI transaction: {tx_hash} for {key_type}",
-                context={"rpc": ContractAdapter.SOMNIA_RPC_MAINNET}
-            )
-
             try:
                 receipt = ContractAdapter._get_transaction_receipt(tx_hash)
             except ValueError as e:
-                raise ValueError(f"RPC error: {e}")
+                raise ValueError(str(e))
 
             if receipt is None:
                 logger.warning(
                     f"Transaction not found or pending: {tx_hash}",
                     context={"reason": "receipt_not_found"}
                 )
-                raise ValueError("Receipt not found")
+                raise ValueError("RECEIPT_NOT_FOUND")
 
             # Check receipt status (1 = success, 0 = failed)
             status = receipt.get("status")
@@ -104,16 +98,23 @@ class ContractAdapter:
                     f"Transaction failed on-chain: {tx_hash}",
                     context={"status": status}
                 )
-                raise ValueError(f"Receipt status failed: {status}")
+                raise ValueError("TX_FAILED_ONCHAIN")
+
+            if not receipt.get("blockNumber"):
+                logger.warning(
+                    f"Receipt missing blockNumber: {tx_hash}",
+                    context={"reason": "missing_block"}
+                )
+                raise ValueError("RECEIPT_MISSING_BLOCK")
 
             # Get full transaction details
             try:
                 tx = ContractAdapter._get_transaction(tx_hash)
             except ValueError as e:
-                raise ValueError(f"RPC error: {e}")
+                raise ValueError(str(e))
 
             if tx is None:
-                raise ValueError("Tx not found")
+                raise ValueError("TX_NOT_FOUND")
 
             # Validate recipient (must be our treasury wallet)
             tx_to = (tx.get("to") or "").lower()
@@ -123,7 +124,7 @@ class ContractAdapter:
                     f"Wrong recipient: {tx_to}, expected {treasury}",
                     context={"tx_hash": tx_hash}
                 )
-                raise ValueError(f"Treasury mismatch: expected {treasury} got {tx_to}")
+                raise ValueError(f"TO_MISMATCH expected={treasury} got={tx_to}")
 
             # Validate sender (must match user's linked wallet)
             if expected_from_wallet:
@@ -135,7 +136,7 @@ class ContractAdapter:
                         f"Wrong sender: {tx_from}, expected {expected_from}",
                         context={"tx_hash": tx_hash}
                     )
-                    raise ValueError(f"Sender mismatch: expected {expected_from} got {tx_from}")
+                    raise ValueError(f"FROM_MISMATCH expected={expected_from} got={tx_from}")
 
             # Validate amount
             tx_value = int(tx.get("value", "0x0"), 16)  # Convert hex to int
@@ -145,17 +146,7 @@ class ContractAdapter:
                     f"Wrong amount: {tx_value} Wei, expected {expected_price}",
                     context={"tx_hash": tx_hash, "key_type": key_type}
                 )
-                raise ValueError(f"Value mismatch: expected {expected_price} got {tx_value}")
-
-            logger.info(
-                f"Transaction verified: {tx_hash}",
-                context={
-                    "key_type": key_type,
-                    "to": tx_to,
-                    "value": tx_value,
-                    "status": status
-                }
-            )
+                raise ValueError(f"VALUE_MISMATCH expected={expected_price} got={tx_value}")
 
             return {
                 "verified": True,
@@ -171,7 +162,7 @@ class ContractAdapter:
             }
 
         except Exception as e:
-            logger.error(f"Transaction verification error: {str(e)}", error=e)
+            logger.warning(f"Transaction verification error: {str(e)}")
             raise
     
     @staticmethod
@@ -199,14 +190,15 @@ class ContractAdapter:
             
             data = response.json()
             if data.get("error"):
-                logger.warning(f"RPC error: {data.get('error')}")
-                raise ValueError(data.get("error"))
+                err = data.get("error") or {}
+                code = err.get("code", "unknown")
+                message = err.get("message", "RPC_ERROR")
+                raise ValueError(f"RPC_ERROR {code}: {message}")
             
             return data.get("result")  # None if pending, dict if found
             
-        except requests.exceptions.RequestException as e:
-            logger.error(f"RPC request error: {str(e)}", error=e)
-            raise ValueError(str(e))
+        except requests.exceptions.RequestException:
+            raise ValueError("RPC_UNREACHABLE")
     
     @staticmethod
     def _get_transaction(tx_hash):
@@ -233,14 +225,15 @@ class ContractAdapter:
             
             data = response.json()
             if data.get("error"):
-                logger.warning(f"RPC error: {data.get('error')}")
-                raise ValueError(data.get("error"))
+                err = data.get("error") or {}
+                code = err.get("code", "unknown")
+                message = err.get("message", "RPC_ERROR")
+                raise ValueError(f"RPC_ERROR {code}: {message}")
             
             return data.get("result")
             
-        except requests.exceptions.RequestException as e:
-            logger.error(f"RPC request error: {str(e)}", error=e)
-            raise ValueError(str(e))
+        except requests.exceptions.RequestException:
+            raise ValueError("RPC_UNREACHABLE")
     
     @staticmethod
     def generate_mock_tx_hash():

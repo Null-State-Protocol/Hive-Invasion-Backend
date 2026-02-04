@@ -1501,7 +1501,7 @@ def handle_key_purchase(event, context, user_id):
         if not tx_hash.startswith("0x"):
             tx_hash = "0x" + tx_hash
         if not re.fullmatch(r"0x[a-fA-F0-9]{64}", tx_hash):
-            reason = "Invalid tx_hash format"
+            reason = "TX_HASH_INVALID"
             log_rejected(reason)
             return build_message_response(reason, status_code=400)
         
@@ -1527,24 +1527,12 @@ def handle_key_purchase(event, context, user_id):
             log_rejected(reason)
             return build_message_response(reason, status_code=400)
         
-        tx_hash_short = f"{tx_hash[:10]}...{tx_hash[-6:]}" if tx_hash else ""
-        wallet_short = f"{wallet_address[:10]}...{wallet_address[-6:]}" if wallet_address else ""
-        logger.info(
-            f"Starting SOMI payment verification: {key_type}",
-            context={"tx_hash": tx_hash_short, "wallet": wallet_short, "user_id": user_id}
-        )
-        
         # Verify transaction on Somnia mainnet
         try:
             verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, wallet_address)
         except (ValueError, KeyError, AssertionError) as e:
             reason = str(e)
-            print("[Keys] verify failed:", {"key_type": key_type, "tx": tx_hash[:12], "reason": reason})
-            logger.warning(
-                f"Transaction verification failed: {tx_hash_short}",
-                context={"reason": reason, "user_id": user_id}
-            )
-            log_rejected(reason)
+            print("[Keys] verify fail:", {"tx": tx_hash[:12], "reason": reason})
             return build_message_response(reason, status_code=400)
         
         if not verification.get("verified"):
@@ -1565,11 +1553,7 @@ def handle_key_purchase(event, context, user_id):
                 }, status_code=202, origin=origin)
             
             # Failed verification (wrong amount, wrong recipient, etc)
-            logger.warning(
-                f"Transaction verification failed: {tx_hash}",
-                context={"reason": reason, "status": status}
-            )
-            log_rejected(reason)
+            print("[Keys] verify fail:", {"tx": tx_hash[:12], "reason": reason})
             return build_message_response(reason, status_code=400)
         
         tx_data = verification.get("tx_data", {})
@@ -1583,7 +1567,7 @@ def handle_key_purchase(event, context, user_id):
             logger.info(
                 "SOMI verification data",
                 context={
-                    "tx_hash": tx_hash_short,
+                    "tx_hash": tx_hash[:12],
                     "to": tx_data.get("to"),
                     "from": tx_data.get("from"),
                     "value": tx_data.get("value"),
@@ -1620,8 +1604,9 @@ def handle_key_purchase(event, context, user_id):
                     error_code="DUPLICATE_TRANSACTION",
                     origin=origin
                 )
-            else:
-                raise
+            reason = str(e)
+            print("[Keys] db write fail:", {"tx": tx_hash[:12], "reason": reason})
+            return build_message_response(f"DB_WRITE_FAILED ({reason})", status_code=400)
         
         logger.info(
             f"Key purchased successfully: {key_type}",
@@ -1650,17 +1635,9 @@ def handle_key_purchase(event, context, user_id):
         log_rejected(reason)
         return build_message_response(reason, status_code=400)
     except Exception as e:
-        print("[Keys] purchase crash:", {
-            "request_id": request_id,
-            "error": repr(e)
-        })
-        logger.error(
-            f"Key purchase error: {str(e)}",
-            error=e,
-            user_id=user_id,
-            context={"tx_hash": tx_hash if 'tx_hash' in locals() else None}
-        )
-        return build_message_response("Internal error", status_code=500, request_id_override=request_id)
+        reason = f"UNEXPECTED_ERROR ({str(e)})"
+        print("[Keys] purchase error:", {"tx": tx_hash[:12] if 'tx_hash' in locals() else None, "reason": reason})
+        return build_message_response(reason, status_code=400)
 
 
 @require_auth()
