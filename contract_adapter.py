@@ -10,14 +10,6 @@ from datetime import datetime, timezone
 from logger import logger
 
 
-class VerificationError(ValueError):
-    """Raised when a transaction verification check fails with safe details."""
-
-    def __init__(self, message, details=None):
-        super().__init__(message)
-        self.details = details or {}
-
-
 class ContractAdapter:
     """
     Somnia payment verification adapter.
@@ -74,29 +66,18 @@ class ContractAdapter:
         try:
             # Validate key type
             if key_type.lower() not in ContractAdapter.PRICE_WEI:
-                raise VerificationError(f"Invalid key type: {key_type}")
+                raise ValueError(f"Invalid key type: {key_type}")
 
             expected_price = ContractAdapter.get_expected_price(key_type)
 
             # Normalize tx_hash
             tx_hash = tx_hash.strip()
             if not tx_hash:
-                raise VerificationError("Empty tx_hash")
+                raise ValueError("Empty tx_hash")
             if not tx_hash.startswith("0x"):
                 tx_hash = "0x" + tx_hash
 
             treasury = ContractAdapter.TREASURY_WALLET.lower()
-            details = {
-                "tx_prefix": tx_hash[:12],
-                "key_type": key_type.lower(),
-                "expected_wei": str(expected_price) if expected_price is not None else None,
-                "to": None,
-                "from": None,
-                "receipt_status": None,
-                "treasury": treasury,
-                "rpc": ContractAdapter.SOMNIA_RPC_MAINNET,
-                "chain_id": ContractAdapter.SOMNIA_CHAIN_ID_MAINNET
-            }
 
             # Call RPC to get transaction receipt
             logger.info(
@@ -107,63 +88,54 @@ class ContractAdapter:
             try:
                 receipt = ContractAdapter._get_transaction_receipt(tx_hash)
             except ValueError as e:
-                raise VerificationError(f"RPC error: {e}", details=details)
+                raise ValueError(f"RPC error: {e}")
 
             if receipt is None:
                 logger.warning(
                     f"Transaction not found or pending: {tx_hash}",
                     context={"reason": "receipt_not_found"}
                 )
-                raise VerificationError("Receipt not found", details=details)
+                raise ValueError("Receipt not found")
 
             # Check receipt status (1 = success, 0 = failed)
             status = receipt.get("status")
-            details["receipt_status"] = status
             if status != "0x1":
                 logger.warning(
                     f"Transaction failed on-chain: {tx_hash}",
                     context={"status": status}
                 )
-                raise VerificationError(f"Receipt status failed: {status}", details=details)
+                raise ValueError(f"Receipt status failed: {status}")
 
             # Get full transaction details
             try:
                 tx = ContractAdapter._get_transaction(tx_hash)
             except ValueError as e:
-                raise VerificationError(f"RPC error: {e}", details=details)
+                raise ValueError(f"RPC error: {e}")
 
             if tx is None:
-                raise VerificationError("Transaction not found", details=details)
+                raise ValueError("Tx not found")
 
             # Validate recipient (must be our treasury wallet)
             tx_to = (tx.get("to") or "").lower()
-            details["to"] = tx_to
 
             if tx_to != treasury:
                 logger.warning(
                     f"Wrong recipient: {tx_to}, expected {treasury}",
                     context={"tx_hash": tx_hash}
                 )
-                raise VerificationError(
-                    f"Recipient mismatch: tx.to={tx_to}, treasury={treasury}",
-                    details=details
-                )
+                raise ValueError(f"Treasury mismatch: expected {treasury} got {tx_to}")
 
             # Validate sender (must match user's linked wallet)
             if expected_from_wallet:
                 tx_from = (tx.get("from") or "").lower()
                 expected_from = expected_from_wallet.lower()
-                details["from"] = tx_from
 
                 if tx_from != expected_from:
                     logger.warning(
                         f"Wrong sender: {tx_from}, expected {expected_from}",
                         context={"tx_hash": tx_hash}
                     )
-                    raise VerificationError(
-                        f"Sender mismatch: tx.from={tx_from}, user_wallet={expected_from}",
-                        details=details
-                    )
+                    raise ValueError(f"Sender mismatch: expected {expected_from} got {tx_from}")
 
             # Validate amount
             tx_value = int(tx.get("value", "0x0"), 16)  # Convert hex to int
@@ -173,10 +145,7 @@ class ContractAdapter:
                     f"Wrong amount: {tx_value} Wei, expected {expected_price}",
                     context={"tx_hash": tx_hash, "key_type": key_type}
                 )
-                raise VerificationError(
-                    f"Value mismatch: tx.value={tx_value}, expected={expected_price}",
-                    details=details
-                )
+                raise ValueError(f"Value mismatch: expected {expected_price} got {tx_value}")
 
             logger.info(
                 f"Transaction verified: {tx_hash}",

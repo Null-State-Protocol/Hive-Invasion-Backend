@@ -1451,7 +1451,7 @@ def handle_keys(event, context, method, path, origin):
 @require_auth()
 def handle_key_purchase(event, context, user_id):
     """POST /keys/purchase - Purchase a key with SOMI payment on Somnia network"""
-    from contract_adapter import ContractAdapter, VerificationError
+    from contract_adapter import ContractAdapter
     from models import add_key_to_player
     from validation import Validator
     from datetime import datetime, timezone
@@ -1464,6 +1464,25 @@ def handle_key_purchase(event, context, user_id):
         origin = get_origin(event)
         body = validate_request_body(event.get('body'))
         
+        def build_message_response(message, status_code=400, request_id=None):
+            headers = SecurityHeaders.get_headers(origin)
+            headers["Content-Type"] = "application/json"
+            body = {"message": message}
+            if request_id:
+                body["request_id"] = request_id
+            return {
+                "statusCode": status_code,
+                "headers": headers,
+                "body": json.dumps(body)
+            }
+
+        def log_rejected(reason):
+            print("[Keys] purchase rejected:", {
+                "tx": tx_hash[:12] if 'tx_hash' in locals() else None,
+                "key_type": key_type if 'key_type' in locals() else None,
+                "reason": reason
+            })
+
         # Validate inputs
         key_type = Validator.required(body, 'key_type')
         tx_hash = Validator.required(body, 'tx_hash')
@@ -1471,24 +1490,18 @@ def handle_key_purchase(event, context, user_id):
         # Normalize key_type
         key_type = key_type.lower()
         if key_type not in {"bronze", "silver", "gold"}:
-            return APIResponse.error(
-                f"Invalid key type: {key_type}",
-                status_code=400,
-                error_code="INVALID_KEY_TYPE",
-                origin=origin
-            )
+            reason = f"Invalid key type: {key_type}"
+            log_rejected(reason)
+            return build_message_response(reason, status_code=400)
         
         # Normalize and validate tx_hash
         tx_hash = tx_hash.strip()
         if not tx_hash.startswith("0x"):
             tx_hash = "0x" + tx_hash
         if not re.fullmatch(r"0x[a-fA-F0-9]{64}", tx_hash):
-            return APIResponse.error(
-                "Invalid tx_hash format",
-                status_code=400,
-                error_code="INVALID_TX_HASH",
-                origin=origin
-            )
+            reason = "Invalid tx_hash format"
+            log_rejected(reason)
+            return build_message_response(reason, status_code=400)
         
         # Verify user has a linked wallet
         import boto3
@@ -1504,19 +1517,13 @@ def handle_key_purchase(event, context, user_id):
         
         # Ensure wallet is linked
         if not wallet_address:
-            return APIResponse.error(
-                "No wallet linked. Please connect your wallet first.",
-                status_code=400,
-                error_code="WALLET_NOT_LINKED",
-                origin=origin
-            )
+            reason = "No wallet linked. Please connect your wallet first."
+            log_rejected(reason)
+            return build_message_response(reason, status_code=400)
         if not re.fullmatch(r"0x[a-fA-F0-9]{40}", wallet_address):
-            return APIResponse.error(
-                "Invalid wallet address",
-                status_code=400,
-                error_code="INVALID_WALLET_ADDRESS",
-                origin=origin
-            )
+            reason = "Invalid wallet address"
+            log_rejected(reason)
+            return build_message_response(reason, status_code=400)
         
         tx_hash_short = f"{tx_hash[:10]}...{tx_hash[-6:]}" if tx_hash else ""
         wallet_short = f"{wallet_address[:10]}...{wallet_address[-6:]}" if wallet_address else ""
@@ -1525,66 +1532,18 @@ def handle_key_purchase(event, context, user_id):
             context={"tx_hash": tx_hash_short, "wallet": wallet_short, "user_id": user_id}
         )
         
-        def build_verify_error(message, details, status_code=400):
-            headers = SecurityHeaders.get_headers(origin)
-            headers["Content-Type"] = "application/json"
-            body = {
-                "ok": False,
-                "code": "VERIFY_FAILED",
-                "message": message,
-                "details": details
-            }
-            return {
-                "statusCode": status_code,
-                "headers": headers,
-                "body": json.dumps(body)
-            }
-
         # Verify transaction on Somnia mainnet
         try:
             verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, wallet_address)
-        except VerificationError as e:
-            print("[Keys] verify failed:", {"key_type": key_type, "tx": tx_hash[:12], "reason": str(e)})
+        except ValueError as e:
+            reason = str(e)
+            print("[Keys] verify failed:", {"key_type": key_type, "tx": tx_hash[:12], "reason": reason})
             logger.warning(
                 f"Transaction verification failed: {tx_hash_short}",
-                context={"reason": str(e), "user_id": user_id}
+                context={"reason": reason, "user_id": user_id}
             )
-            base_details = {
-                "tx_prefix": tx_hash[:12],
-                "key_type": key_type,
-                "expected_wei": str(ContractAdapter.get_expected_price(key_type)),
-                "to": None,
-                "from": wallet_address.lower(),
-                "receipt_status": None,
-                "treasury": ContractAdapter.TREASURY_WALLET.lower(),
-                "rpc": ContractAdapter.SOMNIA_RPC_MAINNET,
-                "chain": "somnia_mainnet",
-                "chain_id": ContractAdapter.SOMNIA_CHAIN_ID_MAINNET
-            }
-            safe_details = base_details
-            if getattr(e, "details", None):
-                safe_details = {**base_details, **e.details}
-            return build_verify_error(str(e), safe_details, status_code=400)
-        except Exception as e:
-            print("[Keys] verify failed:", {"key_type": key_type, "tx": tx_hash[:12], "reason": str(e)})
-            logger.error(
-                f"Transaction verification error: {tx_hash_short}",
-                error=e,
-                user_id=user_id
-            )
-            base_details = {
-                "tx_prefix": tx_hash[:12],
-                "key_type": key_type,
-                "expected_wei": str(ContractAdapter.get_expected_price(key_type)),
-                "to": None,
-                "from": wallet_address.lower(),
-                "receipt_status": None,
-                "treasury": ContractAdapter.TREASURY_WALLET.lower(),
-                "rpc": ContractAdapter.SOMNIA_RPC_MAINNET,
-                "chain": "somnia_mainnet",
-                "chain_id": ContractAdapter.SOMNIA_CHAIN_ID_MAINNET
-            }
-            return build_verify_error(f"Verification error: {str(e)}", base_details, status_code=400)
+            log_rejected(reason)
+            return build_message_response(reason, status_code=400)
         
         if not verification.get("verified"):
             status = verification.get("status")
@@ -1608,12 +1567,8 @@ def handle_key_purchase(event, context, user_id):
                 f"Transaction verification failed: {tx_hash}",
                 context={"reason": reason, "status": status}
             )
-            return APIResponse.error(
-                f"Transaction verification failed: {reason}",
-                status_code=400,
-                error_code=f"TX_VERIFICATION_FAILED_{status}",
-                origin=origin
-            )
+            log_rejected(reason)
+            return build_message_response(reason, status_code=400)
         
         tx_data = verification.get("tx_data", {})
         if tx_data:
@@ -1685,12 +1640,16 @@ def handle_key_purchase(event, context, user_id):
         }, status_code=201, origin=origin)
         
     except ValidationError as e:
-        return APIResponse.validation_error(e.field, e.message, get_origin(event))
+        reason = e.message
+        log_rejected(reason)
+        return build_message_response(reason, status_code=400)
     except Exception as e:
+        request_id = get_request_id(event)
         print("[Keys] purchase error:", {
             "key_type": key_type if 'key_type' in locals() else None,
             "tx": (tx_hash[:12] if 'tx_hash' in locals() else None),
-            "err": str(e)[:180]
+            "err": str(e)[:180],
+            "request_id": request_id
         })
         logger.error(
             f"Key purchase error: {str(e)}",
@@ -1698,12 +1657,7 @@ def handle_key_purchase(event, context, user_id):
             user_id=user_id,
             context={"tx_hash": tx_hash if 'tx_hash' in locals() else None}
         )
-        return APIResponse.error(
-            "Unexpected verify error",
-            status_code=400,
-            error_code="TX_VERIFICATION_FAILED_UNEXPECTED",
-            origin=origin
-        )
+        return build_message_response("Internal error", status_code=500, request_id=request_id)
 
 
 @require_auth()
