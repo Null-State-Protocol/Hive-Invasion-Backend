@@ -448,7 +448,23 @@ def add_key_to_player(user_id, key_type, purchase_event):
     if 'key_purchase_history' in existing and not isinstance(existing.get('key_purchase_history'), list):
         raise Exception('HISTORY_TYPE_INVALID')
 
-    # Atomic update: increment key, append history, and set tx_index in one write
+    # Build updated values for atomic write (single update_item)
+    current_keys = existing.get('keys_owned', {}) or {}
+    current_keys = {
+        'bronze': Decimal(current_keys.get('bronze', 0) or 0),
+        'silver': Decimal(current_keys.get('silver', 0) or 0),
+        'gold': Decimal(current_keys.get('gold', 0) or 0)
+    }
+    current_keys[key_type] = current_keys.get(key_type, Decimal(0)) + Decimal(1)
+
+    purchase_history = existing.get('key_purchase_history', []) or []
+    purchase_history = [purchase_event] + purchase_history
+    purchase_history = purchase_history[:100]
+
+    tx_index = existing.get('tx_index', {}) or {}
+    tx_index[tx_hash] = True
+
+    # Atomic update: set full maps/lists and updated_at in one write
     now = datetime.now(timezone.utc).isoformat()
 
     try:
@@ -456,25 +472,19 @@ def add_key_to_player(user_id, key_type, purchase_event):
             Key={'user_id': user_id},
             UpdateExpression=(
                 'SET '
-                'keys_owned = if_not_exists(keys_owned, :empty_map), '
-                'tx_index = if_not_exists(tx_index, :empty_map), '
-                'keys_owned.#k = if_not_exists(keys_owned.#k, :zero) + :inc, '
-                'key_purchase_history = list_append(if_not_exists(key_purchase_history, :empty_list), :new_event), '
-                'tx_index.#tx = :true, '
+                'keys_owned = :keys, '
+                'key_purchase_history = :history, '
+                'tx_index = :tx_index, '
                 'updated_at = :now'
             ),
             ConditionExpression='attribute_not_exists(tx_index.#tx)',
             ExpressionAttributeNames={
-                '#k': key_type,
                 '#tx': tx_hash
             },
             ExpressionAttributeValues={
-                ':inc': Decimal(1),
-                ':zero': Decimal(0),
-                ':new_event': [purchase_event],
-                ':empty_list': [],
-                ':empty_map': {},
-                ':true': True,
+                ':keys': current_keys,
+                ':history': purchase_history,
+                ':tx_index': tx_index,
                 ':now': now
             },
             ReturnValues='ALL_NEW'
