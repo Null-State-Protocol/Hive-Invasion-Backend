@@ -93,11 +93,7 @@ class ContractAdapter:
                     f"Transaction not found or pending: {tx_hash}",
                     context={"reason": "receipt_not_found"}
                 )
-                return {
-                    "verified": False,
-                    "status": "pending",
-                    "reason": "Transaction not yet confirmed on chain"
-                }
+                raise ValueError("Receipt not found yet")
             
             # Check receipt status (1 = success, 0 = failed)
             status = receipt.get("status")

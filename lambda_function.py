@@ -1532,6 +1532,13 @@ def handle_key_purchase(event, context, user_id):
                 f"Transaction verification failed: {tx_hash_short}",
                 context={"reason": str(e), "user_id": user_id}
             )
+            if "Receipt not found yet" in str(e):
+                return APIResponse.error(
+                    "Receipt not found yet. Retry in a few seconds.",
+                    status_code=400,
+                    error_code="TX_RECEIPT_NOT_READY",
+                    origin=origin
+                )
             return APIResponse.error(
                 f"Transaction verification failed: {str(e)}",
                 status_code=400,
