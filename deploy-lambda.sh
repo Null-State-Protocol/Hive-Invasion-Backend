@@ -138,7 +138,9 @@ aws lambda update-function-configuration \
         JWT_ACCESS_TOKEN_EXPIRE_MINUTES=60,
         JWT_REFRESH_TOKEN_EXPIRE_DAYS=30,
         ENVIRONMENT=production,
-        LOG_LEVEL=INFO
+        LOG_LEVEL=INFO,
+        SOMNIA_RPC_MAINNET=https://api.infra.mainnet.somnia.network/,
+        SOMNIA_TREASURY_WALLET=0xEbD49456f4b448E9455bDD89B42e7EFD24567D60
     }" \
     --region $REGION \
     --no-cli-pager &> /dev/null
