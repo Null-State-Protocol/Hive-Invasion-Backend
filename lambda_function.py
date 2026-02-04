@@ -1451,12 +1451,14 @@ def handle_keys(event, context, method, path, origin):
 @require_auth()
 def handle_key_purchase(event, context, user_id):
     """POST /keys/purchase - Purchase a key with SOMI payment on Somnia network"""
-    from contract_adapter import ContractAdapter
+    from contract_adapter import ContractAdapter, VerificationError
     from models import add_key_to_player
     from validation import Validator
     from datetime import datetime, timezone
     import uuid
     import re
+    import json
+    from security import SecurityHeaders
     
     try:
         origin = get_origin(event)
@@ -1523,28 +1525,46 @@ def handle_key_purchase(event, context, user_id):
             context={"tx_hash": tx_hash_short, "wallet": wallet_short, "user_id": user_id}
         )
         
+        def build_verify_error(message, details, status_code=400):
+            headers = SecurityHeaders.get_headers(origin)
+            headers["Content-Type"] = "application/json"
+            body = {
+                "ok": False,
+                "code": "VERIFY_FAILED",
+                "message": message,
+                "details": details
+            }
+            return {
+                "statusCode": status_code,
+                "headers": headers,
+                "body": json.dumps(body)
+            }
+
         # Verify transaction on Somnia mainnet
         try:
             verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, wallet_address)
-        except ValueError as e:
+        except VerificationError as e:
             print("[Keys] verify failed:", {"key_type": key_type, "tx": tx_hash[:12], "reason": str(e)})
             logger.warning(
                 f"Transaction verification failed: {tx_hash_short}",
                 context={"reason": str(e), "user_id": user_id}
             )
-            if "Receipt not found yet" in str(e):
-                return APIResponse.error(
-                    "Receipt not found yet. Retry in a few seconds.",
-                    status_code=400,
-                    error_code="TX_RECEIPT_NOT_READY",
-                    origin=origin
-                )
-            return APIResponse.error(
-                f"Transaction verification failed: {str(e)}",
-                status_code=400,
-                error_code="TX_VERIFICATION_FAILED_INVALID",
-                origin=origin
-            )
+            base_details = {
+                "tx_prefix": tx_hash[:12],
+                "key_type": key_type,
+                "expected_wei": str(ContractAdapter.get_expected_price(key_type)),
+                "to": None,
+                "from": wallet_address.lower(),
+                "receipt_status": None,
+                "treasury": ContractAdapter.TREASURY_WALLET.lower(),
+                "rpc": ContractAdapter.SOMNIA_RPC_MAINNET,
+                "chain": "somnia_mainnet",
+                "chain_id": ContractAdapter.SOMNIA_CHAIN_ID_MAINNET
+            }
+            safe_details = base_details
+            if getattr(e, "details", None):
+                safe_details = {**base_details, **e.details}
+            return build_verify_error(str(e), safe_details, status_code=400)
         except Exception as e:
             print("[Keys] verify failed:", {"key_type": key_type, "tx": tx_hash[:12], "reason": str(e)})
             logger.error(
@@ -1552,12 +1572,19 @@ def handle_key_purchase(event, context, user_id):
                 error=e,
                 user_id=user_id
             )
-            return APIResponse.error(
-                f"Verification error: {str(e)}",
-                status_code=400,
-                error_code="TX_VERIFICATION_FAILED_ERROR",
-                origin=origin
-            )
+            base_details = {
+                "tx_prefix": tx_hash[:12],
+                "key_type": key_type,
+                "expected_wei": str(ContractAdapter.get_expected_price(key_type)),
+                "to": None,
+                "from": wallet_address.lower(),
+                "receipt_status": None,
+                "treasury": ContractAdapter.TREASURY_WALLET.lower(),
+                "rpc": ContractAdapter.SOMNIA_RPC_MAINNET,
+                "chain": "somnia_mainnet",
+                "chain_id": ContractAdapter.SOMNIA_CHAIN_ID_MAINNET
+            }
+            return build_verify_error(f"Verification error: {str(e)}", base_details, status_code=400)
         
         if not verification.get("verified"):
             status = verification.get("status")

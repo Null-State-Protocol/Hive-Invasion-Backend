@@ -10,6 +10,14 @@ from datetime import datetime, timezone
 from logger import logger
 
 
+class VerificationError(ValueError):
+    """Raised when a transaction verification check fails with safe details."""
+
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = details or {}
+
+
 class ContractAdapter:
     """
     Somnia payment verification adapter.
@@ -26,9 +34,9 @@ class ContractAdapter:
     
     # Key prices in Wei (1 SOMI = 10^18 Wei)
     PRICE_WEI = {
-        "bronze": int(0.1 * 1e18),    # 0.1 SOMI
-        "silver": int(0.5 * 1e18),    # 0.5 SOMI
-        "gold": int(1.0 * 1e18)       # 1.0 SOMI
+        "bronze": 100000000000000000,   # 0.1 SOMI
+        "silver": 500000000000000000,   # 0.5 SOMI
+        "gold": 1000000000000000000     # 1.0 SOMI
     }
     
     @staticmethod
@@ -66,88 +74,110 @@ class ContractAdapter:
         try:
             # Validate key type
             if key_type.lower() not in ContractAdapter.PRICE_WEI:
-                raise ValueError(f"Invalid key type: {key_type}")
-            
+                raise VerificationError(f"Invalid key type: {key_type}")
+
             expected_price = ContractAdapter.get_expected_price(key_type)
-            
+
             # Normalize tx_hash
             tx_hash = tx_hash.strip()
             if not tx_hash:
-                raise ValueError("Empty tx_hash")
+                raise VerificationError("Empty tx_hash")
             if not tx_hash.startswith("0x"):
                 tx_hash = "0x" + tx_hash
-            
+
+            treasury = ContractAdapter.TREASURY_WALLET.lower()
+            details = {
+                "tx_prefix": tx_hash[:12],
+                "key_type": key_type.lower(),
+                "expected_wei": str(expected_price) if expected_price is not None else None,
+                "to": None,
+                "from": None,
+                "receipt_status": None,
+                "treasury": treasury,
+                "rpc": ContractAdapter.SOMNIA_RPC_MAINNET,
+                "chain_id": ContractAdapter.SOMNIA_CHAIN_ID_MAINNET
+            }
+
             # Call RPC to get transaction receipt
             logger.info(
                 f"Verifying SOMI transaction: {tx_hash} for {key_type}",
                 context={"rpc": ContractAdapter.SOMNIA_RPC_MAINNET}
             )
-            
+
             try:
-                    receipt = ContractAdapter._get_transaction_receipt(tx_hash)
+                receipt = ContractAdapter._get_transaction_receipt(tx_hash)
             except ValueError as e:
-                raise ValueError(f"RPC error: {e}")
-            
+                raise VerificationError(f"RPC error: {e}", details=details)
+
             if receipt is None:
                 logger.warning(
                     f"Transaction not found or pending: {tx_hash}",
                     context={"reason": "receipt_not_found"}
                 )
-                raise ValueError("Receipt not found yet")
-            
+                raise VerificationError("Receipt not found", details=details)
+
             # Check receipt status (1 = success, 0 = failed)
             status = receipt.get("status")
+            details["receipt_status"] = status
             if status != "0x1":
                 logger.warning(
                     f"Transaction failed on-chain: {tx_hash}",
                     context={"status": status}
                 )
-                raise ValueError(f"Transaction failed on-chain (status: {status})")
-            
+                raise VerificationError(f"Receipt status failed: {status}", details=details)
+
             # Get full transaction details
             try:
                 tx = ContractAdapter._get_transaction(tx_hash)
             except ValueError as e:
-                raise ValueError(f"RPC error: {e}")
-                if tx is None:
-                    raise ValueError("Could not retrieve transaction details")
-            
+                raise VerificationError(f"RPC error: {e}", details=details)
+
+            if tx is None:
+                raise VerificationError("Transaction not found", details=details)
+
             # Validate recipient (must be our treasury wallet)
             tx_to = (tx.get("to") or "").lower()
-            treasury = ContractAdapter.TREASURY_WALLET.lower()
-            
+            details["to"] = tx_to
+
             if tx_to != treasury:
                 logger.warning(
                     f"Wrong recipient: {tx_to}, expected {treasury}",
                     context={"tx_hash": tx_hash}
                 )
-                raise ValueError(f"Recipient mismatch: received {tx_to}, expected {treasury}")
-            
+                raise VerificationError(
+                    f"Recipient mismatch: tx.to={tx_to}, treasury={treasury}",
+                    details=details
+                )
+
             # Validate sender (must match user's linked wallet)
             if expected_from_wallet:
                 tx_from = (tx.get("from") or "").lower()
                 expected_from = expected_from_wallet.lower()
-                
+                details["from"] = tx_from
+
                 if tx_from != expected_from:
                     logger.warning(
                         f"Wrong sender: {tx_from}, expected {expected_from}",
                         context={"tx_hash": tx_hash}
                     )
-                    raise ValueError(f"Sender mismatch: tx sent from {tx_from}, but user wallet is {expected_from}")
-            
+                    raise VerificationError(
+                        f"Sender mismatch: tx.from={tx_from}, user_wallet={expected_from}",
+                        details=details
+                    )
+
             # Validate amount
             tx_value = int(tx.get("value", "0x0"), 16)  # Convert hex to int
-            
+
             if tx_value != expected_price:
                 logger.warning(
                     f"Wrong amount: {tx_value} Wei, expected {expected_price}",
                     context={"tx_hash": tx_hash, "key_type": key_type}
                 )
-                raise ValueError(f"Amount mismatch: received {tx_value} Wei, expected {expected_price} Wei")
-            
-            # Validate chain ID (verify we're on Somnia mainnet)
-            # Note: We could also check chainId from transaction if available
-            
+                raise VerificationError(
+                    f"Value mismatch: tx.value={tx_value}, expected={expected_price}",
+                    details=details
+                )
+
             logger.info(
                 f"Transaction verified: {tx_hash}",
                 context={
@@ -157,7 +187,7 @@ class ContractAdapter:
                     "status": status
                 }
             )
-            
+
             return {
                 "verified": True,
                 "status": "success",
@@ -170,7 +200,7 @@ class ContractAdapter:
                     "blockNumber": int(receipt.get("blockNumber", "0x0"), 16)
                 }
             }
-            
+
         except Exception as e:
             logger.error(f"Transaction verification error: {str(e)}", error=e)
             raise
