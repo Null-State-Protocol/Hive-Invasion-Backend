@@ -1582,15 +1582,6 @@ def handle_key_purchase(event, context, user_id):
     except Exception as e:
         logger.error(f"Key purchase error: {str(e)}", error=e, user_id=user_id)
         return APIResponse.server_error(origin=origin)
-            "message": "Key purchased successfully with verified SOMI payment"
-        }, status_code=201, origin=origin)
-        
-    except ValidationError as e:
-        return APIResponse.validation_error(e.field, e.message, get_origin(event))
-    except Exception as e:
-        logger.error(f"Key purchase error: {str(e)}", error=e, user_id=user_id)
-        return APIResponse.server_error(origin=origin)
-        return APIResponse.server_error(origin=get_origin(event))
 
 
 @require_auth()
