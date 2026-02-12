@@ -1721,7 +1721,6 @@ def handle_session_end_by_body(event, context, user_id):
 
 # ==================== KEY STORE HANDLERS ====================
 
-
 def handle_keys(event, context, method, path, origin):
     """
     Handle key purchase/ownership endpoints.

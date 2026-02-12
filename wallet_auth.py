@@ -208,9 +208,29 @@ class WalletAuthService:
             if "Item" in response:
                 existing_user_id = response["Item"]["user_id"]
                 if existing_user_id == user_id:
-                    return False, "Wallet already linked to your account"
+                    # Ensure user record is updated even if legacy records are out of sync
+                    self.users_table.update_item(
+                        Key={"user_id": user_id},
+                        UpdateExpression="SET wallet_address = :wallet",
+                        ExpressionAttributeValues={":wallet": wallet_address}
+                    )
+                    return True, None
                 else:
                     return False, "Wallet already linked to another account"
+
+            # Check if user already has a different wallet linked (legacy/old binding)
+            user_response = self.users_table.get_item(Key={"user_id": user_id})
+            if "Item" in user_response:
+                existing_wallet = user_response["Item"].get("wallet_address")
+                if existing_wallet and existing_wallet != wallet_address:
+                    try:
+                        # Remove old wallet mapping for this user
+                        self.user_wallets_table.delete_item(
+                            Key={"wallet_address": existing_wallet}
+                        )
+                    except Exception:
+                        # Non-fatal: continue with new link
+                        pass
             
             # Link wallet
             self.user_wallets_table.put_item(Item={

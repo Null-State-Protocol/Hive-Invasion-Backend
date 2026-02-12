@@ -159,9 +159,9 @@ class SecurityHeaders:
             "Referrer-Policy": "strict-origin-when-cross-origin",
         }
         
-        # CORS headers - Always allow for now (development/testing)
+        # CORS headers - Use provided origin, default to wildcard
         headers.update({
-            "Access-Control-Allow-Origin": "*",
+            "Access-Control-Allow-Origin": origin or "*",
             "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
             "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, Accept, Origin",
             "Access-Control-Allow-Credentials": "true",

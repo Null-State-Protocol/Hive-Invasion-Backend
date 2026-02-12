@@ -73,7 +73,7 @@ class Config:
     LOG_RETENTION_DAYS = 90
     
     # Feature Flags
-    ENABLE_EMAIL_VERIFICATION = os.getenv("ENABLE_EMAIL_VERIFICATION", "true").lower() == "true"
+    ENABLE_EMAIL_VERIFICATION = os.getenv("ENABLE_EMAIL_VERIFICATION", "false").lower() == "true"
     ENABLE_RATE_LIMITING = os.getenv("ENABLE_RATE_LIMITING", "true").lower() == "true"
     ENABLE_ANALYTICS = os.getenv("ENABLE_ANALYTICS", "true").lower() == "true"
     ENABLE_FRAUD_DETECTION = os.getenv("ENABLE_FRAUD_DETECTION", "true").lower() == "true"
@@ -115,7 +115,7 @@ class Config:
 class DevelopmentConfig(Config):
     """Development configuration"""
     LOG_LEVEL = "DEBUG"
-    ENABLE_EMAIL_VERIFICATION = True  # Email verification aktif
+    ENABLE_EMAIL_VERIFICATION = False  # Email verification kapali varsayilan
     JWT_ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours for easier dev
 
 
@@ -123,7 +123,7 @@ class ProductionConfig(Config):
     """Production configuration with stricter security"""
     PASSWORD_REQUIRE_SPECIAL = True
     BCRYPT_ROUNDS = 14
-    ENABLE_EMAIL_VERIFICATION = True
+    ENABLE_EMAIL_VERIFICATION = False
     ENABLE_RATE_LIMITING = True
     ENABLE_FRAUD_DETECTION = True
 

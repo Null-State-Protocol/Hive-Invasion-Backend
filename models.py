@@ -901,6 +901,24 @@ def update_gems(user_id, amount):
     return new_gems
 
 
+def set_gems(user_id, value):
+    """
+    Set player's gem count to an absolute value.
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    new_gems = max(0, int(value))
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET gems = :gems, updated_at = :now',
+        ExpressionAttributeValues={
+            ':gems': new_gems,
+            ':now': now
+        }
+    )
+    return new_gems
+
+
 def update_dust(user_id, amount):
     """
     Update player's dust count.
@@ -935,6 +953,207 @@ def update_dust(user_id, amount):
     return new_dust
 
 
+def set_dust(user_id, value):
+    """
+    Set player's dust count to an absolute value.
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    new_dust = max(0, int(value))
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET dust_count = :dust, updated_at = :now',
+        ExpressionAttributeValues={
+            ':dust': new_dust,
+            ':now': now
+        }
+    )
+    return new_dust
+
+
+def update_high_score(user_id, high_score):
+    """
+    Update player's high score if higher than current.
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    current = int(player_data.get('high_score', 0))
+    new_score = int(high_score)
+    if new_score < current:
+        return current
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET high_score = :score, updated_at = :now',
+        ExpressionAttributeValues={
+            ':score': new_score,
+            ':now': now
+        }
+    )
+    return new_score
+
+
+def update_level(user_id, level):
+    """
+    Set player's level to an absolute value.
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    new_level = max(1, int(level))
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET #lvl = :level, updated_at = :now',
+        ExpressionAttributeNames={'#lvl': 'level'},
+        ExpressionAttributeValues={
+            ':level': new_level,
+            ':now': now
+        }
+    )
+    return new_level
+
+
+def update_skill_locations(user_id, skill_locations):
+    """
+    Set player's skill locations array.
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    locations = skill_locations or []
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET skill_locations = :loc, updated_at = :now',
+        ExpressionAttributeValues={
+            ':loc': locations,
+            ':now': now
+        }
+    )
+    return locations
+
+
+def save_player_data(user_id, dust=None, high_score=None, gems=None):
+    """
+    Save multiple player fields in one call.
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    updates = []
+    values = {':now': now}
+    if dust is not None:
+        updates.append('dust_count = :dust')
+        values[':dust'] = max(0, int(dust))
+    if high_score is not None:
+        updates.append('high_score = :score')
+        values[':score'] = int(high_score)
+    if gems is not None:
+        updates.append('gems = :gems')
+        values[':gems'] = max(0, int(gems))
+    if not updates:
+        return {'dust': None, 'high_score': None, 'gems': None}
+    update_expr = 'SET ' + ', '.join(updates) + ', updated_at = :now'
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression=update_expr,
+        ExpressionAttributeValues=values
+    )
+    return {
+        'dust': values.get(':dust'),
+        'high_score': values.get(':score'),
+        'gems': values.get(':gems')
+    }
+
+
+def remove_boost(user_id, boost_id):
+    """
+    Remove a boost from player's active boosts list.
+    """
+    table = dynamodb.Table('hive_player_data')
+    now = datetime.now(timezone.utc).isoformat()
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    boosts = player_data.get('boosts', [])
+    new_boosts = [b for b in boosts if b.get('boost_id') != boost_id]
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET boosts = :boosts, updated_at = :now',
+        ExpressionAttributeValues={
+            ':boosts': new_boosts,
+            ':now': now
+        }
+    )
+    return {'boosts': new_boosts}
+
+
+def spend_key(user_id, key_type):
+    """
+    Spend a key by decrementing owned count.
+    """
+    table = dynamodb.Table('hive_player_data')
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    keys_owned = player_data.get('keys_owned', {})
+    current = int(keys_owned.get(key_type, 0))
+    if current <= 0:
+        return {'error': 'No keys available'}
+    keys_owned[key_type] = current - 1
+    now = datetime.now(timezone.utc).isoformat()
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET keys_owned = :keys, updated_at = :now',
+        ExpressionAttributeValues={
+            ':keys': keys_owned,
+            ':now': now
+        }
+    )
+    return {'keys_owned': keys_owned}
+
+
+def update_achievement_progress(user_id, achievement_id, progress):
+    """
+    Update achievement progress or create if missing.
+    """
+    import boto3
+    from config import config
+    from botocore.exceptions import ClientError
+    dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+    achievements_table = dynamodb.Table(config.TABLE_ACHIEVEMENTS)
+    now = datetime.now(timezone.utc).isoformat()
+    progress_value = max(0, min(100, int(progress)))
+
+    # Try to update existing achievement, or insert if it doesn't exist
+    try:
+        response = achievements_table.update_item(
+            Key={
+                'user_id': user_id,
+                'achievement_id': achievement_id
+            },
+            UpdateExpression='SET progress = :progress, updated_at = :now',
+            ExpressionAttributeValues={
+                ':progress': progress_value,
+                ':now': now
+            },
+            ReturnValues='ALL_NEW'
+        )
+        return {
+            'achievement_id': achievement_id,
+            'progress': progress_value,
+            'updated_at': now
+        }
+    except ClientError as e:
+        # If item doesn't exist, create it
+        if e.response['Error']['Code'] == 'ValidationException':
+            achievement = {
+                'user_id': user_id,
+                'achievement_id': achievement_id,
+                'unlocked_at': now,
+                'progress': progress_value,
+                'updated_at': now
+            }
+            achievements_table.put_item(Item=achievement)
+            return achievement
+        raise
+
+
 def unlock_achievement(user_id, achievement_id):
     """
     Unlock an achievement for the player.
@@ -947,8 +1166,9 @@ def unlock_achievement(user_id, achievement_id):
         dict: New achievement object
     """
     import boto3
-    dynamodb = boto3.resource('dynamodb', region_name='eu-north-1')
-    achievements_table = dynamodb.Table('hive_achievements')
+    from config import config
+    dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+    achievements_table = dynamodb.Table(config.TABLE_ACHIEVEMENTS)
     
     now = datetime.now(timezone.utc).isoformat()
     

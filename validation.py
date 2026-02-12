@@ -180,7 +180,7 @@ def validate_skill_locations(skill_locations: List[Dict[str, Any]]) -> List[Dict
         location = Validator.required(item, "location")
         
         skill = Validator.string(skill, f"skillLocations[{i}].skill", max_length=50)
-        location = Validator.integer(location, f"skillLocations[{i}].location", min_value=0)
+        location = Validator.integer(location, f"skillLocations[{i}].location")
         
         validated.append({"skill": skill, "location": location})
     

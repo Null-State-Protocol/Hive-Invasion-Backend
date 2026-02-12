@@ -10,6 +10,37 @@ from datetime import datetime
 from security import SecurityHeaders
 
 
+def inject_cors_headers(response: Dict, origin: str = "*") -> Dict:
+    """
+    Ensures CORS headers are present in every response.
+    This is the SINGLE point where CORS is guaranteed to be added.
+    
+    Args:
+        response: Lambda response dict with statusCode, headers, body
+        origin: Request origin for CORS
+    
+    Returns:
+        Response dict with guaranteed CORS headers
+    """
+    if not isinstance(response, dict):
+        return response
+    
+    # Ensure headers dict exists
+    if "headers" not in response:
+        response["headers"] = {}
+    
+    # Inject CORS headers (will override any existing ones)
+    cors_headers = {
+        "Access-Control-Allow-Origin": origin or "*",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With, Accept, Origin",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+        "Access-Control-Max-Age": "86400",
+    }
+    
+    response["headers"].update(cors_headers)
+    return response
+
+
 class DecimalEncoder(json.JSONEncoder):
     """JSON encoder that handles Decimal and datetime objects"""
     

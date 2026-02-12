@@ -70,6 +70,20 @@ aws dynamodb create-table \
     --region $REGION \
     --no-cli-pager
 
+# Achievements table
+echo "📊 Creating achievements table..."
+aws dynamodb create-table \
+    --table-name hive_achievements \
+    --attribute-definitions \
+        AttributeName=user_id,AttributeType=S \
+        AttributeName=achievement_id,AttributeType=S \
+    --key-schema \
+        AttributeName=user_id,KeyType=HASH \
+        AttributeName=achievement_id,KeyType=RANGE \
+    --billing-mode PAY_PER_REQUEST \
+    --region $REGION \
+    --no-cli-pager
+
 # Leaderboard tables
 echo "📊 Creating leaderboard tables..."
 for period in daily weekly alltime; do
@@ -150,6 +164,7 @@ echo "   - hive_user_emails"
 echo "   - hive_user_wallets"
 echo "   - hive_sessions"
 echo "   - hive_player_data"
+echo "   - hive_achievements"
 echo "   - hive_leaderboard_daily"
 echo "   - hive_leaderboard_weekly"
 echo "   - hive_leaderboard_alltime"
