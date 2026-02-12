@@ -1,9 +1,10 @@
-"""
+""" 
 Input validation utilities
 """
 
 from typing import Any, Dict, List, Optional, Tuple
 from decimal import Decimal
+from logger import logger
 
 
 class ValidationError(Exception):
@@ -21,13 +22,16 @@ class Validator:
     def required(data: Dict[str, Any], field: str) -> Any:
         """Check if field is present and not None"""
         if field not in data:
+            logger.debug(f"Validation error: required field missing", context={"field": field})
             raise ValidationError(field, "This field is required")
         
         value = data[field]
         if value is None:
+            logger.debug(f"Validation error: field is null", context={"field": field})
             raise ValidationError(field, "This field cannot be null")
         
         if isinstance(value, str) and not value.strip():
+            logger.debug(f"Validation error: field is empty", context={"field": field})
             raise ValidationError(field, "This field cannot be empty")
         
         return value
@@ -41,12 +45,15 @@ class Validator:
     def string(value: Any, field: str, min_length: int = 0, max_length: int = 10000) -> str:
         """Validate string"""
         if not isinstance(value, str):
+            logger.debug(f"Validation error: not a string", context={"field": field, "type": type(value).__name__})
             raise ValidationError(field, "Must be a string")
         
         if len(value) < min_length:
+            logger.debug(f"Validation error: string too short", context={"field": field, "length": len(value), "min_length": min_length})
             raise ValidationError(field, f"Must be at least {min_length} characters")
         
         if len(value) > max_length:
+            logger.debug(f"Validation error: string too long", context={"field": field, "length": len(value), "max_length": max_length})
             raise ValidationError(field, f"Must be at most {max_length} characters")
         
         return value
@@ -62,12 +69,15 @@ class Validator:
             elif not isinstance(value, int):
                 raise ValueError()
         except (ValueError, TypeError):
+            logger.debug(f"Validation error: not an integer", context={"field": field, "value": value, "type": type(value).__name__})
             raise ValidationError(field, "Must be an integer")
         
         if min_value is not None and value < min_value:
+            logger.debug(f"Validation error: value too small", context={"field": field, "value": value, "min_value": min_value})
             raise ValidationError(field, f"Must be at least {min_value}")
         
         if max_value is not None and value > max_value:
+            logger.debug(f"Validation error: value too large", context={"field": field, "value": value, "max_value": max_value})
             raise ValidationError(field, f"Must be at most {max_value}")
         
         return value

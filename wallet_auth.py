@@ -34,13 +34,17 @@ class WalletAuthService:
             (success, data, error_message)
         """
         try:
+            logger.info("Message to sign requested", context={"wallet_address": wallet_address})
             wallet_address = wallet_address.lower()
             
             if not is_valid_wallet_address(wallet_address):
+                logger.warning("Invalid wallet address format", context={"wallet_address": wallet_address})
                 return False, None, "Invalid wallet address"
             
             timestamp = int(time.time())
             message = SignatureValidator.create_message_to_sign(wallet_address, timestamp)
+            
+            logger.debug("Message created for signing", context={"wallet_address": wallet_address, "timestamp": timestamp})
             
             return True, {
                 "message": message,
@@ -49,7 +53,7 @@ class WalletAuthService:
             }, None
         
         except Exception as e:
-            logger.error("Failed to create message to sign", error=e)
+            logger.error("Failed to create message to sign", error=e, context={"wallet_address": wallet_address})
             return False, None, "Failed to create signature message"
     
     def authenticate_wallet(
@@ -65,16 +69,18 @@ class WalletAuthService:
             (success, auth_data, error_message)
         """
         try:
+            logger.info("Wallet authentication started", context={"wallet_address": wallet_address})
             wallet_address = wallet_address.lower()
             
             if not is_valid_wallet_address(wallet_address):
+                logger.warning("Invalid wallet address in authentication", context={"wallet_address": wallet_address})
                 return False, None, "Invalid wallet address"
             
             # Extract and verify timestamp from message (replay attack prevention)
             import re
             match = re.search(r'Timestamp: (\d+)', message)
             if not match:
-                logger.warning("Message missing timestamp", context={"wallet": wallet_address})
+                logger.warning("Message missing timestamp - potential security issue", context={"wallet": wallet_address})
                 return False, None, "Invalid message format"
             
             timestamp = int(match.group(1))
@@ -85,11 +91,12 @@ class WalletAuthService:
             if time_diff > 300:
                 logger.warning(
                     "Message timestamp expired or invalid",
-                    context={"wallet": wallet_address, "time_diff": time_diff}
+                    context={"wallet": wallet_address, "time_diff": time_diff, "timestamp": timestamp, "current_time": current_time}
                 )
                 return False, None, "Message expired. Please request a new signature."
             
             # Verify signature
+            logger.debug("Verifying signature", context={"wallet_address": wallet_address})
             is_valid = SignatureValidator.verify_eth_signature(message, signature, wallet_address)
             if not is_valid:
                 logger.warning(
@@ -99,6 +106,7 @@ class WalletAuthService:
                 return False, None, "Invalid signature"
             
             # Check if wallet is linked to an existing user
+            logger.debug("Checking wallet linkage", context={"wallet_address": wallet_address})
             response = self.user_wallets_table.get_item(
                 Key={"wallet_address": wallet_address}
             )
@@ -106,19 +114,23 @@ class WalletAuthService:
             if "Item" in response:
                 # Existing user
                 user_id = response["Item"]["user_id"]
+                logger.info("Existing wallet found", context={"wallet_address": wallet_address, "user_id": user_id})
                 
                 # Get user data
                 user_response = self.users_table.get_item(Key={"user_id": user_id})
                 if "Item" not in user_response:
+                    logger.error("User data not found for wallet", context={"user_id": user_id, "wallet_address": wallet_address})
                     return False, None, "User not found"
                 
                 user_data = user_response["Item"]
                 
                 # Check if account is active
                 if not user_data.get("is_active", True):
+                    logger.warning("Login attempt on deactivated wallet account", context={"user_id": user_id, "wallet_address": wallet_address})
                     return False, None, "Account is deactivated"
                 
                 # Update last login
+                logger.debug("Updating last login for existing user", context={"user_id": user_id})
                 self.users_table.update_item(
                     Key={"user_id": user_id},
                     UpdateExpression="SET last_login_at = :now",
@@ -130,6 +142,7 @@ class WalletAuthService:
             
             else:
                 # New wallet - create user
+                logger.info("Creating new user for wallet", context={"wallet_address": wallet_address})
                 user_id = str(uuid.uuid4())
                 now = now_iso()
                 
@@ -145,9 +158,11 @@ class WalletAuthService:
                 )
                 
                 # Store user
+                logger.debug("Storing new wallet user", context={"user_id": user_id, "wallet_address": wallet_address})
                 self.users_table.put_item(Item=user.to_db_item())
                 
                 # Link wallet
+                logger.debug("Linking wallet to new user", context={"user_id": user_id, "wallet_address": wallet_address})
                 self.user_wallets_table.put_item(Item={
                     "wallet_address": wallet_address,
                     "user_id": user_id,
@@ -163,7 +178,10 @@ class WalletAuthService:
                 )
             
             # Create auth tokens
+            logger.debug("Creating auth tokens for wallet user", context={"user_id": user_id})
             tokens = JWTHandler.create_token_pair(user_id)
+            
+            logger.info("Wallet authentication successful", context={"user_id": user_id, "wallet_address": wallet_address, "is_new_user": is_new_user})
             
             return True, {
                 "user": user.to_dict(),
@@ -173,7 +191,12 @@ class WalletAuthService:
             }, None
         
         except Exception as e:
-            logger.error("Wallet authentication failed", error=e)
+            import traceback
+            logger.error("Wallet authentication failed with exception", error=e, context={
+                "wallet_address": wallet_address,
+                "error_type": type(e).__name__,
+                "traceback": traceback.format_exc()
+            })
             return False, None, "Authentication failed"
     
     def link_wallet_to_user(
@@ -190,17 +213,22 @@ class WalletAuthService:
             (success, error_message)
         """
         try:
+            logger.info("Wallet linking started", context={"user_id": user_id, "wallet_address": wallet_address})
             wallet_address = wallet_address.lower()
             
             if not is_valid_wallet_address(wallet_address):
+                logger.warning("Invalid wallet address for linking", context={"wallet_address": wallet_address, "user_id": user_id})
                 return False, "Invalid wallet address"
             
             # Verify signature
+            logger.debug("Verifying signature for wallet linking", context={"user_id": user_id, "wallet_address": wallet_address})
             is_valid = SignatureValidator.verify_eth_signature(message, signature, wallet_address)
             if not is_valid:
+                logger.warning("Invalid signature for wallet linking", context={"user_id": user_id, "wallet_address": wallet_address})
                 return False, "Invalid signature"
             
             # Check if wallet is already linked
+            logger.debug("Checking if wallet already linked", context={"wallet_address": wallet_address})
             response = self.user_wallets_table.get_item(
                 Key={"wallet_address": wallet_address}
             )
@@ -209,6 +237,7 @@ class WalletAuthService:
                 existing_user_id = response["Item"]["user_id"]
                 if existing_user_id == user_id:
                     # Ensure user record is updated even if legacy records are out of sync
+                    logger.info("Wallet already linked to this user - updating user record", context={"user_id": user_id, "wallet_address": wallet_address})
                     self.users_table.update_item(
                         Key={"user_id": user_id},
                         UpdateExpression="SET wallet_address = :wallet",
@@ -216,6 +245,7 @@ class WalletAuthService:
                     )
                     return True, None
                 else:
+                    logger.warning("Wallet already linked to different user", context={"wallet_address": wallet_address, "existing_user_id": existing_user_id, "requested_user_id": user_id})
                     return False, "Wallet already linked to another account"
 
             # Check if user already has a different wallet linked (legacy/old binding)

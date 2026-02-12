@@ -1508,11 +1508,14 @@ def handle_session_start(event, context, user_id):
         difficulty = body.get('difficulty', 'normal')
         game_mode = body.get('game_mode', 'survival')
         
+        logger.info("Session start requested", context={"user_id": user_id, "difficulty": difficulty, "game_mode": game_mode})
+        
         # Validate inputs
         valid_difficulties = ['normal', 'hard', 'insane']
         valid_modes = ['survival', 'endless', 'campaign']
         
         if difficulty not in valid_difficulties:
+            logger.warning("Invalid difficulty specified", context={"user_id": user_id, "difficulty": difficulty})
             return APIResponse.error(
                 f"Invalid difficulty. Must be one of: {', '.join(valid_difficulties)}",
                 status_code=400,
@@ -1521,6 +1524,7 @@ def handle_session_start(event, context, user_id):
             )
         
         if game_mode not in valid_modes:
+            logger.warning("Invalid game mode specified", context={"user_id": user_id, "game_mode": game_mode})
             return APIResponse.error(
                 f"Invalid game_mode. Must be one of: {', '.join(valid_modes)}",
                 status_code=400,
@@ -1531,12 +1535,16 @@ def handle_session_start(event, context, user_id):
         # Create session
         session = create_game_session(user_id, difficulty, game_mode)
         
-        logger.info(f"Session started: {session['session_id']} by user {user_id}")
+        logger.info(f"Session started successfully", context={"session_id": session['session_id'], "user_id": user_id, "difficulty": difficulty, "game_mode": game_mode})
         
         return APIResponse.success(session, status_code=201, origin=origin)
         
     except Exception as e:
-        logger.error(f"Error in handle_session_start: {str(e)}")
+        import traceback
+        logger.error(f"Error in handle_session_start", error=e, context={
+            "user_id": user_id,
+            "traceback": traceback.format_exc()
+        })
         return APIResponse.server_error(origin=get_origin(event))
 
 
@@ -1557,6 +1565,7 @@ def handle_session_end(event, context, user_id, path):
         # Extract session_id from path
         parts = path.split('/')
         if len(parts) != 3:
+            logger.warning("Invalid path format for session end", context={"path": path, "user_id": user_id})
             return APIResponse.error(
                 "Invalid path format",
                 status_code=400,
@@ -1566,9 +1575,12 @@ def handle_session_end(event, context, user_id, path):
         
         session_id = parts[1]
         
+        logger.info("Session end requested", context={"session_id": session_id, "user_id": user_id})
+        
         # Get session
         session = get_game_session(session_id)
         if not session:
+            logger.warning("Session not found", context={"session_id": session_id, "user_id": user_id})
             return APIResponse.error(
                 "Session not found",
                 status_code=404,
@@ -1578,6 +1590,7 @@ def handle_session_end(event, context, user_id, path):
         
         # Verify ownership
         if session['user_id'] != user_id:
+            logger.warning("Session access forbidden", context={"session_id": session_id, "user_id": user_id, "session_owner": session['user_id']})
             return APIResponse.error(
                 "Forbidden",
                 status_code=403,
@@ -1587,6 +1600,7 @@ def handle_session_end(event, context, user_id, path):
         
         # Check if already ended
         if session.get('status') == 'ended':
+            logger.warning("Attempt to end already ended session", context={"session_id": session_id, "user_id": user_id})
             return APIResponse.error(
                 "Session already ended",
                 status_code=400,
@@ -1598,6 +1612,8 @@ def handle_session_end(event, context, user_id, path):
         score = body.get('score', 0)
         duration_seconds = body.get('duration', 0)
         end_reason = body.get('reason', 'completed')
+        
+        logger.debug("Ending session", context={"session_id": session_id, "score": score, "duration_seconds": duration_seconds, "reason": end_reason})
         
         # End the session
         end_game_session(session_id, score, duration_seconds, end_reason)

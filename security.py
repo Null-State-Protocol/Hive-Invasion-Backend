@@ -1,4 +1,4 @@
-"""
+""" 
 Security utilities for password hashing, encryption, and validation
 """
 
@@ -10,6 +10,7 @@ from typing import Optional, Tuple
 from datetime import datetime, timezone
 
 from config import config
+from logger import logger
 
 
 class PasswordHasher:
@@ -18,6 +19,7 @@ class PasswordHasher:
     @staticmethod
     def hash_password(password: str) -> str:
         """Hash a password using PBKDF2-HMAC-SHA256"""
+        logger.debug("Hashing password")
         salt = secrets.token_bytes(32)
         iterations = 100000
         dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, iterations)
@@ -28,15 +30,21 @@ class PasswordHasher:
     def verify_password(password: str, hashed: str) -> bool:
         """Verify a password against a hash"""
         try:
+            logger.debug("Verifying password")
             parts = hashed.split(':')
             if len(parts) != 3:
+                logger.warning("Invalid password hash format")
                 return False
             iterations = int(parts[0])
             salt = base64.b64decode(parts[1])
             stored_hash = base64.b64decode(parts[2])
             dk = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt, iterations)
-            return hmac.compare_digest(dk, stored_hash)
-        except Exception:
+            is_valid = hmac.compare_digest(dk, stored_hash)
+            if not is_valid:
+                logger.debug("Password verification failed")
+            return is_valid
+        except Exception as e:
+            logger.error("Password verification error", error=e)
             return False
     
     @staticmethod
@@ -45,28 +53,37 @@ class PasswordHasher:
         Validate password strength
         Returns: (is_valid, error_message)
         """
+        logger.debug("Validating password strength")
+        
         if len(password) < config.PASSWORD_MIN_LENGTH:
+            logger.debug(f"Password too short: {len(password)} < {config.PASSWORD_MIN_LENGTH}")
             return False, f"Password must be at least {config.PASSWORD_MIN_LENGTH} characters"
         
         if config.PASSWORD_REQUIRE_UPPERCASE and not any(c.isupper() for c in password):
+            logger.debug("Password missing uppercase letter")
             return False, "Password must contain at least one uppercase letter"
         
         if config.PASSWORD_REQUIRE_LOWERCASE and not any(c.islower() for c in password):
+            logger.debug("Password missing lowercase letter")
             return False, "Password must contain at least one lowercase letter"
         
         if config.PASSWORD_REQUIRE_DIGIT and not any(c.isdigit() for c in password):
+            logger.debug("Password missing digit")
             return False, "Password must contain at least one digit"
         
         if config.PASSWORD_REQUIRE_SPECIAL:
             special_chars = "!@#$%^&*()_+-=[]{}|;:,.<>?"
             if not any(c in special_chars for c in password):
+                logger.debug("Password missing special character")
                 return False, "Password must contain at least one special character"
         
         # Check for common weak passwords
         weak_passwords = {"password", "12345678", "qwerty", "admin", "letmein"}
         if password.lower() in weak_passwords:
+            logger.warning("Weak password detected")
             return False, "Password is too common"
         
+        logger.debug("Password strength validation passed")
         return True, None
 
 
@@ -104,6 +121,7 @@ class SignatureValidator:
         Note: This is a placeholder. In production, use web3.py or eth_account
         """
         try:
+            logger.debug("Verifying Ethereum signature", context={"wallet_address": wallet_address})
             # TODO: Implement proper Ethereum signature verification
             # from eth_account.messages import encode_defunct
             # from web3.auto import w3
@@ -113,8 +131,12 @@ class SignatureValidator:
             # return recovered_address.lower() == wallet_address.lower()
             
             # For now, return True if signature is non-empty (placeholder)
-            return len(signature) > 0 and len(wallet_address) == 42
-        except Exception:
+            is_valid = len(signature) > 0 and len(wallet_address) == 42
+            if not is_valid:
+                logger.warning("Signature verification failed", context={"wallet_address": wallet_address})
+            return is_valid
+        except Exception as e:
+            logger.error("Signature verification error", error=e, context={"wallet_address": wallet_address})
             return False
 
 
@@ -192,35 +214,45 @@ def sanitize_input(text: str, max_length: int = 1000) -> str:
 def is_valid_email(email: str) -> bool:
     """Basic email validation"""
     if not email or len(email) > 254:
+        logger.debug("Email validation failed - length check", context={"length": len(email) if email else 0})
         return False
     
     if '@' not in email:
+        logger.debug("Email validation failed - missing @")
         return False
     
     local, domain = email.rsplit('@', 1)
     
     if len(local) == 0 or len(local) > 64:
+        logger.debug("Email validation failed - invalid local part length", context={"local_length": len(local)})
         return False
     
     if len(domain) == 0 or '.' not in domain:
+        logger.debug("Email validation failed - invalid domain")
         return False
     
     # Basic character validation
     import re
     email_pattern = re.compile(r'^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$')
-    return bool(email_pattern.match(email))
+    is_valid = bool(email_pattern.match(email))
+    if not is_valid:
+        logger.debug("Email validation failed - pattern mismatch", context={"email": email})
+    return is_valid
 
 
 def is_valid_wallet_address(address: str) -> bool:
     """Validate Ethereum wallet address with checksum validation"""
     if not address:
+        logger.debug("Wallet address validation failed - empty address")
         return False
     
     # Check if it's a valid Ethereum address format
     if not address.startswith('0x'):
+        logger.debug("Wallet address validation failed - missing 0x prefix")
         return False
     
     if len(address) != 42:
+        logger.debug("Wallet address validation failed - incorrect length", context={"length": len(address)})
         return False
     
     # Check if all characters after 0x are hex
@@ -232,6 +264,8 @@ def is_valid_wallet_address(address: str) -> bool:
             return Web3.is_address(address)
         except ImportError:
             # Fallback to basic validation
+            logger.debug("Web3 not available - using basic wallet address validation")
             return True
     except ValueError:
+        logger.debug("Wallet address validation failed - invalid hex characters")
         return False

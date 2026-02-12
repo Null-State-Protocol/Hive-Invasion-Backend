@@ -99,6 +99,7 @@ class JWTHandler:
             Tuple of (is_valid, payload, error_message)
         """
         try:
+            logger.debug("Verifying JWT token", context={"expected_type": expected_type})
             payload = jwt.decode(
                 token,
                 config.JWT_SECRET,
@@ -107,16 +108,20 @@ class JWTHandler:
             
             # Check token type if specified
             if expected_type and payload.get("type") != expected_type:
+                logger.warning("Token type mismatch", context={"expected": expected_type, "actual": payload.get("type")})
                 return False, None, f"Invalid token type. Expected {expected_type}"
             
             # Check if token is expired (jwt.decode already does this, but let's be explicit)
             exp = payload.get("exp")
             if exp and datetime.fromtimestamp(exp, timezone.utc) < datetime.now(timezone.utc):
+                logger.warning("Token expired", context={"exp": exp, "user_id": payload.get("sub")})
                 return False, None, "Token has expired"
             
+            logger.debug("Token verified successfully", context={"user_id": payload.get("sub"), "type": payload.get("type")})
             return True, payload, None
         
         except jwt.ExpiredSignatureError:
+            logger.info("Token verification failed - expired signature")
             return False, None, "Token has expired"
         
         except jwt.InvalidTokenError as e:
@@ -151,6 +156,7 @@ class JWTHandler:
         Returns:
             Dict with 'access_token' and 'refresh_token'
         """
+        logger.debug("Creating token pair", context={"user_id": user_id})
         return {
             "access_token": JWTHandler.create_access_token(user_id),
             "refresh_token": JWTHandler.create_refresh_token(user_id),

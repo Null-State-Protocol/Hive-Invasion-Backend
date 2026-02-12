@@ -44,22 +44,26 @@ class EmailAuthService:
             (success, user_data, error_message)
         """
         try:
+            logger.info("Registration started", context={"email": email, "send_verification": send_verification})
             print(f"[REGISTER] Starting registration for {email}")
             
             # Validate email
             email = email.lower().strip()
             if not is_valid_email(email):
+                logger.warning("Registration failed - invalid email", context={"email": email})
                 print(f"[REGISTER] Invalid email: {email}")
                 return False, None, "Invalid email address"
             
             # Validate password strength (required)
             is_strong, password_error = PasswordHasher.validate_password_strength(password)
             if not is_strong:
+                logger.warning("Registration failed - weak password", context={"email": email, "error": password_error})
                 print(f"[REGISTER] Password validation failed: {password_error}")
                 return False, None, password_error
             
             # Check if email already exists
             try:
+                logger.debug("Checking if email exists", context={"email": email})
                 print(f"[REGISTER] Checking if email exists...")
                 response = self.user_emails_table.get_item(Key={"email": email})
                 if "Item" in response:
@@ -67,10 +71,12 @@ class EmailAuthService:
                     existing_user_id = response["Item"]["user_id"]
                     user_response = self.users_table.get_item(Key={"user_id": existing_user_id})
                     if user_response.get("Item", {}).get("email_verified"):
+                        logger.info("Registration attempt with existing verified email", context={"email": email, "user_id": existing_user_id})
                         print(f"[REGISTER] Email already registered and verified")
                         return False, None, "Email already registered"
                     else:
                         # Email exists but not verified - resend code
+                        logger.info("Resending verification code for unverified email", context={"email": email, "user_id": existing_user_id})
                         print(f"[REGISTER] Email exists but not verified - resending code")
                         self._send_verification_email(email, existing_user_id, resend=True)
                         return True, {
@@ -79,15 +85,18 @@ class EmailAuthService:
                             "message": "Verification code resent"
                         }, None
             except ClientError as e:
+                logger.error("Error checking email existence", error=e, context={"email": email})
                 print(f"[REGISTER] Error checking email: {e}")
                 pass
             
             # Create user
+            logger.debug("Creating new user", context={"email": email})
             print(f"[REGISTER] Creating user...")
             user_id = str(uuid.uuid4())
             password_hash = PasswordHasher.hash_password(password)
             now = now_iso()
             
+            logger.debug("Creating User object", context={"user_id": user_id, "email": email})
             print(f"[REGISTER] Creating User object...")
             user = User(
                 user_id=user_id,
@@ -101,10 +110,12 @@ class EmailAuthService:
             )
             
             # Store in users table
+            logger.debug("Storing user in database", context={"user_id": user_id})
             print(f"[REGISTER] Storing in users table...")
             self.users_table.put_item(Item=user.to_db_item())
             
             # Store email -> user_id mapping
+            logger.debug("Storing email mapping", context={"email": email, "user_id": user_id})
             print(f"[REGISTER] Storing email mapping...")
             self.user_emails_table.put_item(Item={
                 "email": email,
@@ -119,9 +130,11 @@ class EmailAuthService:
             
             # Send verification email if enabled
             if config.ENABLE_EMAIL_VERIFICATION and send_verification:
+                logger.info("Sending verification email", context={"user_id": user_id, "email": email})
                 print(f"[REGISTER] Sending verification email...")
                 self._send_verification_email(email, user_id)
             
+            logger.info("User registration successful", context={"user_id": user_id, "email": email, "email_verification_required": config.ENABLE_EMAIL_VERIFICATION})
             print(f"[REGISTER] Registration successful!")
             return True, {
                 "user": {"user_id": user_id, "email": email},
@@ -132,7 +145,11 @@ class EmailAuthService:
             print(f"[REGISTER] Exception occurred: {type(e).__name__}: {str(e)}")
             import traceback
             print(f"[REGISTER] Traceback: {traceback.format_exc()}")
-            logger.error("Registration failed", error=e)
+            logger.error("Registration failed with exception", error=e, context={
+                "email": email,
+                "error_type": type(e).__name__,
+                "traceback": traceback.format_exc()
+            })
             return False, None, "Registration failed. Please try again."
     
     def login(
@@ -147,30 +164,37 @@ class EmailAuthService:
             (success, auth_data, error_message)
         """
         try:
+            logger.info("Login attempt started", context={"email": email})
             email = email.lower().strip()
             
             # Get user_id from email
+            logger.debug("Looking up user by email", context={"email": email})
             response = self.user_emails_table.get_item(Key={"email": email})
             if "Item" not in response:
+                logger.warning("Login failed - email not found", context={"email": email})
                 return False, None, "Invalid email or password"
             
             user_id = response["Item"]["user_id"]
             
             # Get user data
+            logger.debug("Fetching user data", context={"user_id": user_id})
             response = self.users_table.get_item(Key={"user_id": user_id})
             if "Item" not in response:
+                logger.error("Login failed - user data not found", context={"user_id": user_id, "email": email})
                 return False, None, "User not found"
             
             user_data = response["Item"]
             
             # Check if account is active
             if not user_data.get("is_active", True):
+                logger.warning("Login attempt on deactivated account", context={"user_id": user_id, "email": email})
                 return False, None, "Account is deactivated"
             
             # Verify password first (before email verification check)
+            logger.debug("Verifying password", context={"user_id": user_id})
             password_hash = user_data.get("password_hash")
             if not password_hash or not PasswordHasher.verify_password(password, password_hash):
-                logger.warning("Failed login attempt", context={"email": email})
+                logger.warning("Failed login attempt - invalid password", context={"user_id": user_id, "email": email})
                 return False, None, "Invalid email or password"
             
             # Check if 2-step login is required (user-specific setting or global config)
@@ -178,10 +202,11 @@ class EmailAuthService:
             if require_verification:
                 # For 2-step login, ALWAYS require email verification on each login
                 # Return special error that triggers verification code flow
-                logger.info("2-step login required", context={"email": email})
+                logger.info("2-step login required", context={"user_id": user_id, "email": email})
                 return False, None, "2-step verification required. Please verify your email."
             
             # Update last login
+            logger.debug("Updating last login timestamp", context={"user_id": user_id})
             self.users_table.update_item(
                 Key={"user_id": user_id},
                 UpdateExpression="SET last_login_at = :now",
@@ -192,9 +217,10 @@ class EmailAuthService:
             user = User(**user_data)
             
             # Create auth tokens
+            logger.debug("Creating auth tokens", context={"user_id": user_id})
             tokens = JWTHandler.create_token_pair(user_id)
             
-            logger.info("User logged in", context={"user_id": user_id})
+            logger.info("User logged in successfully", context={"user_id": user_id, "email": email})
             
             return True, {
                 "user": user.to_dict(),
@@ -202,7 +228,12 @@ class EmailAuthService:
             }, None
         
         except Exception as e:
-            logger.error("Login failed", error=e)
+            import traceback
+            logger.error("Login failed with exception", error=e, context={
+                "email": email,
+                "error_type": type(e).__name__,
+                "traceback": traceback.format_exc()
+            })
             return False, None, "Login failed. Please try again."
     
     def request_password_reset(self, email: str) -> Tuple[bool, Optional[str]]:

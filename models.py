@@ -186,6 +186,7 @@ def create_game_session(user_id, difficulty='normal', game_mode='survival'):
     Returns:
         dict: Session object with session_id, user_id, started_at, etc.
     """
+    logger.info("Creating game session", context={"user_id": user_id, "difficulty": difficulty, "game_mode": game_mode})
     table = dynamodb.Table('hive_sessions')
     session_id = str(uuid.uuid4())
     now = datetime.now(timezone.utc).isoformat()
@@ -201,8 +202,13 @@ def create_game_session(user_id, difficulty='normal', game_mode='survival'):
         'duration_seconds': 0
     }
     
-    table.put_item(Item=session)
-    return session
+    try:
+        table.put_item(Item=session)
+        logger.info("Game session created", context={"session_id": session_id, "user_id": user_id})
+        return session
+    except Exception as e:
+        logger.error("Failed to create game session", error=e, context={"user_id": user_id, "difficulty": difficulty})
+        raise
 
 
 def get_game_session(session_id):
@@ -215,9 +221,19 @@ def get_game_session(session_id):
     Returns:
         dict or None: Session object if found
     """
+    logger.debug("Fetching game session", context={"session_id": session_id})
     table = dynamodb.Table('hive_sessions')
-    response = table.get_item(Key={'session_id': session_id})
-    return response.get('Item')
+    try:
+        response = table.get_item(Key={'session_id': session_id})
+        session = response.get('Item')
+        if session:
+            logger.debug("Game session found", context={"session_id": session_id})
+        else:
+            logger.warning("Game session not found", context={"session_id": session_id})
+        return session
+    except Exception as e:
+        logger.error("Failed to fetch game session", error=e, context={"session_id": session_id})
+        raise
 
 
 def end_game_session(session_id, score, duration_seconds, reason='user_quit'):
@@ -233,24 +249,31 @@ def end_game_session(session_id, score, duration_seconds, reason='user_quit'):
     Returns:
         dict: Updated session object
     """
+    logger.info("Ending game session", context={"session_id": session_id, "score": score, "duration_seconds": duration_seconds, "reason": reason})
     table = dynamodb.Table('hive_sessions')
     now = datetime.now(timezone.utc).isoformat()
     
-    table.update_item(
-        Key={'session_id': session_id},
-        UpdateExpression='SET #status = :status, final_score = :score, ended_at = :ended, duration_seconds = :duration, end_reason = :reason',
-        ExpressionAttributeNames={'#status': 'status'},
-        ExpressionAttributeValues={
-            ':status': 'ended',
-            ':score': score,
-            ':ended': now,
-            ':duration': duration_seconds,
-            ':reason': reason
-        }
-    )
-    
-    # Return updated session
-    return get_game_session(session_id)
+    try:
+        table.update_item(
+            Key={'session_id': session_id},
+            UpdateExpression='SET #status = :status, final_score = :score, ended_at = :ended, duration_seconds = :duration, end_reason = :reason',
+            ExpressionAttributeNames={'#status': 'status'},
+            ExpressionAttributeValues={
+                ':status': 'ended',
+                ':score': score,
+                ':ended': now,
+                ':duration': duration_seconds,
+                ':reason': reason
+            }
+        )
+        
+        logger.info("Game session ended", context={"session_id": session_id, "final_score": score})
+        
+        # Return updated session
+        return get_game_session(session_id)
+    except Exception as e:
+        logger.error("Failed to end game session", error=e, context={"session_id": session_id})
+        raise
 
 
 def get_player_data(user_id):
@@ -263,16 +286,23 @@ def get_player_data(user_id):
     Returns:
         dict: Player data (level, xp, gold, total_score)
     """
+    logger.debug("Fetching player data", context={"user_id": user_id})
     table = dynamodb.Table('hive_player_data')
-    response = table.get_item(Key={'user_id': user_id})
-    return response.get('Item', {
-        'user_id': user_id,
-        'level': 1,
-        'experience': 0,
-        'gold': 0,
-        'total_score': 0,
-        'games_played': 0
-    })
+    try:
+        response = table.get_item(Key={'user_id': user_id})
+        player_data = response.get('Item', {
+            'user_id': user_id,
+            'level': 1,
+            'experience': 0,
+            'gold': 0,
+            'total_score': 0,
+            'games_played': 0
+        })
+        logger.debug("Player data fetched", context={"user_id": user_id, "level": player_data.get('level')})
+        return player_data
+    except Exception as e:
+        logger.error("Failed to fetch player data", error=e, context={"user_id": user_id})
+        raise
 
 
 def update_player_progression(user_id, score_earned, xp_earned, gold_earned):
@@ -288,6 +318,7 @@ def update_player_progression(user_id, score_earned, xp_earned, gold_earned):
     Returns:
         dict: Updated player data with level_up flag
     """
+    logger.info("Updating player progression", context={"user_id": user_id, "score_earned": score_earned, "xp_earned": xp_earned, "gold_earned": gold_earned})
     table = dynamodb.Table('hive_player_data')
     player = get_player_data(user_id)
     
@@ -302,30 +333,44 @@ def update_player_progression(user_id, score_earned, xp_earned, gold_earned):
     new_score = old_score + score_earned
     new_level = calculate_level_from_xp(new_xp)
     
-    table.update_item(
-        Key={'user_id': user_id},
-        UpdateExpression='SET experience = :xp, #lvl = :level, gold = :gold, total_score = :score, games_played = :games',
-        ExpressionAttributeNames={'#lvl': 'level'},
-        ExpressionAttributeValues={
-            ':xp': new_xp,
-            ':level': new_level,
-            ':gold': new_gold,
-            ':score': new_score,
-            ':games': games_played + 1
+    try:
+        table.update_item(
+            Key={'user_id': user_id},
+            UpdateExpression='SET experience = :xp, #lvl = :level, gold = :gold, total_score = :score, games_played = :games',
+            ExpressionAttributeNames={'#lvl': 'level'},
+            ExpressionAttributeValues={
+                ':xp': new_xp,
+                ':level': new_level,
+                ':gold': new_gold,
+                ':score': new_score,
+                ':games': games_played + 1
+            }
+        )
+        
+        level_up = new_level > old_level
+        
+        logger.info("Player progression updated", context={
+            "user_id": user_id,
+            "old_level": old_level,
+            "new_level": new_level,
+            "level_up": level_up,
+            "total_score": new_score
+        })
+        
+        return {
+            'user_id': user_id,
+            'old_level': old_level,
+            'new_level': new_level,
+            'level_up': level_up,
+            'experience': new_xp,
+            'xp_earned': xp_earned,
+            'gold': new_gold,
+            'gold_earned': gold_earned,
+            'total_score': new_score
         }
-    )
-    
-    return {
-        'user_id': user_id,
-        'old_level': old_level,
-        'new_level': new_level,
-        'level_up': new_level > old_level,
-        'experience': new_xp,
-        'xp_earned': xp_earned,
-        'gold': new_gold,
-        'gold_earned': gold_earned,
-        'total_score': new_score
-    }
+    except Exception as e:
+        logger.error("Failed to update player progression", error=e, context={"user_id": user_id})
+        raise
 
 
 def calculate_level_from_xp(xp):

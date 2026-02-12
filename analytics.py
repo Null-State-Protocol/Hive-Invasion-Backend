@@ -82,6 +82,13 @@ class AnalyticsService:
             Success status
         """
         try:
+            logger.info(f"Tracking analytics event: {event_type.value}", context={
+                "user_id": user_id,
+                "event_type": event_type.value,
+                "session_id": session_id,
+                "platform": platform
+            })
+            
             now = datetime.now(timezone.utc)
             event_id = str(uuid.uuid4())
             
@@ -119,7 +126,14 @@ class AnalyticsService:
         except ClientError as e:
             logger.error(
                 f"Failed to track analytics event: {event_type.value}",
-                context={"user_id": user_id},
+                context={"user_id": user_id, "event_type": event_type.value},
+                error=e
+            )
+            return False
+        except Exception as e:
+            logger.error(
+                f"Unexpected error tracking analytics event",
+                context={"user_id": user_id, "event_type": event_type.value},
                 error=e
             )
             return False
@@ -134,6 +148,7 @@ class AnalyticsService:
     ) -> List[Dict]:
         """Get events for a specific user"""
         try:
+            logger.debug("Querying user events", context={"user_id": user_id, "event_type": event_type.value if event_type else None, "limit": limit})
             query_params = {
                 "IndexName": "UserEventsIndex",
                 "KeyConditionExpression": "user_id = :user_id",
@@ -162,7 +177,9 @@ class AnalyticsService:
                 query_params["ExpressionAttributeValues"][":event_type"] = event_type.value
             
             response = self.table.query(**query_params)
-            return response.get("Items", [])
+            events = response.get("Items", [])
+            logger.debug("User events retrieved", context={"user_id": user_id, "count": len(events)})
+            return events
         
         except ClientError as e:
             logger.error(f"Failed to query user events", context={"user_id": user_id}, error=e)
