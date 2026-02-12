@@ -1273,6 +1273,7 @@ def handle_save_player_data(event, context, user_id):
 def handle_update_achievement(event, context, user_id):
     """Update achievement progress"""
     origin = get_origin(event)
+    body = None
     try:
         from models import update_achievement_progress
         from validation import Validator
@@ -1292,7 +1293,7 @@ def handle_update_achievement(event, context, user_id):
     except ValidationError as e:
         return APIResponse.validation_error(e.field, e.message, origin)
     except Exception as e:
-        logger.error("Update achievement error", error=str(e), user_id=user_id, achievement_id=body.get('achievement_id'), progress_value=body.get('progress'))
+        logger.error("Update achievement error", error=str(e), user_id=user_id, body=body)
         return APIResponse.server_error(origin=origin)
 
 
