@@ -1280,12 +1280,19 @@ def handle_update_achievement(event, context, user_id):
         body = validate_request_body(event.get('body'))
         achievement_id = Validator.required(body, 'achievement_id')
         progress = int(Validator.required(body, 'progress'))
+        
+        # Log request for debugging
+        logger.info("Achievement update request", 
+                   user_id=user_id, 
+                   achievement_id=achievement_id, 
+                   progress=progress)
+        
         result = update_achievement_progress(user_id, achievement_id, progress)
         return APIResponse.success(result, origin=origin)
     except ValidationError as e:
         return APIResponse.validation_error(e.field, e.message, origin)
     except Exception as e:
-        logger.error("Update achievement error", error=e, user_id=user_id)
+        logger.error("Update achievement error", error=str(e), user_id=user_id, achievement_id=body.get('achievement_id'), progress_value=body.get('progress'))
         return APIResponse.server_error(origin=origin)
 
 

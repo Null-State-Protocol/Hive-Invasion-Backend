@@ -1111,17 +1111,58 @@ def spend_key(user_id, key_type):
 def update_achievement_progress(user_id, achievement_id, progress):
     """
     Update achievement progress or create if missing.
+    Only updates if new progress is higher than existing (prevents downgrades).
     """
     import boto3
     from config import config
     from botocore.exceptions import ClientError
+    from logger import logger
     dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
     achievements_table = dynamodb.Table(config.TABLE_ACHIEVEMENTS)
     now = datetime.now(timezone.utc).isoformat()
     progress_value = max(0, min(100, int(progress)))
-
-    # Try to update existing achievement, or insert if it doesn't exist
+    
+    # First, check if achievement exists and get current progress
     try:
+        response = achievements_table.get_item(
+            Key={
+                'user_id': user_id,
+                'achievement_id': achievement_id
+            }
+        )
+        
+        if 'Item' in response:
+            # Achievement exists - check current progress
+            current_progress = int(response['Item'].get('progress', 0))
+            
+            if progress_value <= current_progress:
+                # Don't downgrade progress
+                logger.info("Achievement progress NOT updated (no progress)", 
+                           user_id=user_id, 
+                           achievement_id=achievement_id, 
+                           current_progress=current_progress,
+                           requested_progress=progress_value)
+                return {
+                    'achievement_id': achievement_id,
+                    'progress': current_progress,
+                    'updated_at': response['Item'].get('updated_at'),
+                    'message': 'Progress not updated (already at or above requested value)'
+                }
+            
+            # Update with higher progress
+            logger.info("Achievement progress updated", 
+                       user_id=user_id, 
+                       achievement_id=achievement_id, 
+                       old_progress=current_progress,
+                       new_progress=progress_value)
+        else:
+            # New achievement
+            logger.info("Creating new achievement", 
+                       user_id=user_id, 
+                       achievement_id=achievement_id, 
+                       progress_value=progress_value)
+        
+        # Update or create achievement (only if progress increased or new)
         response = achievements_table.update_item(
             Key={
                 'user_id': user_id,
@@ -1134,23 +1175,15 @@ def update_achievement_progress(user_id, achievement_id, progress):
             },
             ReturnValues='ALL_NEW'
         )
+        
         return {
             'achievement_id': achievement_id,
             'progress': progress_value,
             'updated_at': now
         }
+        
     except ClientError as e:
-        # If item doesn't exist, create it
-        if e.response['Error']['Code'] == 'ValidationException':
-            achievement = {
-                'user_id': user_id,
-                'achievement_id': achievement_id,
-                'unlocked_at': now,
-                'progress': progress_value,
-                'updated_at': now
-            }
-            achievements_table.put_item(Item=achievement)
-            return achievement
+        logger.error("Achievement update error", error=str(e), user_id=user_id, achievement_id=achievement_id)
         raise
 
 
