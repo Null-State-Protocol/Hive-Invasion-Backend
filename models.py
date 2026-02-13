@@ -17,6 +17,7 @@ class User:
     email: Optional[str] = None
     password_hash: Optional[str] = None
     wallet_address: Optional[str] = None
+    username: Optional[str] = None
     created_at: Optional[str] = None
     updated_at: Optional[str] = None
     email_verified: bool = False

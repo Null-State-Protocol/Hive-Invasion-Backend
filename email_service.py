@@ -270,6 +270,211 @@ Hive Invasion Team
             logger.error(f"Unexpected error sending email", error=e)
             return False
     
+    def send_password_reset_code_email(self, to_email: str, reset_code: str, user_name: str = None) -> bool:
+        """Send password reset email with 4-digit code"""
+        try:
+            display_name = user_name or to_email.split('@')[0]
+            
+            # HTML email body
+            html_body = f"""
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+        * {{ margin: 0; padding: 0; box-sizing: border-box; }}
+        body {{ 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background-color: #f5f5f5;
+            line-height: 1.6;
+            color: #333;
+            padding: 20px;
+        }}
+        .email-wrapper {{
+            max-width: 600px;
+            margin: 0 auto;
+            background: #ffffff;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+        }}
+        .header {{
+            background: #000;
+            padding: 40px 30px;
+            text-align: center;
+        }}
+        .logo {{
+            width: 120px;
+            height: auto;
+            margin-bottom: 15px;
+        }}
+        .header h1 {{
+            color: #FFEB3B;
+            font-size: 28px;
+            font-weight: 700;
+            margin: 0;
+        }}
+        .header-subtitle {{
+            color: #fff;
+            font-size: 14px;
+            margin-top: 8px;
+        }}
+        .content {{
+            padding: 40px 30px;
+        }}
+        .greeting {{
+            font-size: 18px;
+            color: #333;
+            margin-bottom: 20px;
+        }}
+        .message {{
+            font-size: 15px;
+            color: #666;
+            margin-bottom: 30px;
+            line-height: 1.6;
+        }}
+        .code-container {{
+            text-align: center;
+            margin: 35px 0;
+            background: #f8f9fa;
+            border: 2px solid #e0e0e0;
+            border-radius: 8px;
+            padding: 30px;
+        }}
+        .code-label {{
+            color: #666;
+            font-size: 13px;
+            font-weight: 600;
+            margin-bottom: 15px;
+            text-transform: uppercase;
+        }}
+        .reset-code {{
+            font-size: 48px;
+            font-weight: 700;
+            color: #000;
+            letter-spacing: 12px;
+            font-family: 'Courier New', monospace;
+        }}
+        .info-box {{
+            background: #fff9e6;
+            border-left: 3px solid #FFEB3B;
+            padding: 15px 20px;
+            margin: 25px 0;
+            font-size: 14px;
+            color: #666;
+        }}
+        .footer {{
+            background: #f8f9fa;
+            padding: 25px 30px;
+            text-align: center;
+            border-top: 1px solid #e0e0e0;
+        }}
+        .footer-logo {{
+            color: #333;
+            font-size: 16px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }}
+        .footer p {{
+            color: #999;
+            font-size: 12px;
+            margin: 5px 0;
+        }}
+    </style>
+</head>
+<body>
+    <div class="email-wrapper">
+        <div class="header">
+            <img src="https://hive-invasion-website.kagan-fa3.workers.dev/assets/raw.png" alt="Hive Invasion" class="logo">
+            <h1>HIVE INVASION</h1>
+            <p class="header-subtitle">Password Reset</p>
+        </div>
+        
+        <div class="content">
+            <p class="greeting">Hi, <strong>{display_name}</strong></p>
+            
+            <p class="message">
+                We received a request to reset your password. Enter the code below on the password reset page to create a new password.
+            </p>
+            
+            <div class="code-container">
+                <div class="code-label">Reset Code</div>
+                <div class="reset-code">{reset_code}</div>
+            </div>
+            
+            <div class="info-box">
+                This code expires in 1 hour. If you did not request a password reset, please ignore this email and your password will remain unchanged.
+            </div>
+        </div>
+        
+        <div class="footer">
+            <p class="footer-logo">HIVE INVASION</p>
+            <p>This is an automated message. Please do not reply.</p>
+            <p>© {datetime.now().year} Pixcape Games. All rights reserved.</p>
+        </div>
+    </div>
+</body>
+</html>
+            """
+            
+            # Text fallback
+            text_body = f"""
+HIVE INVASION - Password Reset
+
+Hi {display_name}
+
+Your password reset code is: {reset_code}
+
+Enter this code on the password reset page to create a new password.
+
+This code expires in 1 hour.
+
+If you did not request this, please ignore this email.
+
+---
+Hive Invasion Team
+© {datetime.now().year} Pixcape Games
+            """
+            
+            # Send email
+            response = self.ses.send_email(
+                Source=self.sender_email,
+                Destination={'ToAddresses': [to_email]},
+                Message={
+                    'Subject': {
+                        'Data': f'Hive Invasion - Reset Code: {reset_code}',
+                        'Charset': 'UTF-8'
+                    },
+                    'Body': {
+                        'Text': {
+                            'Data': text_body,
+                            'Charset': 'UTF-8'
+                        },
+                        'Html': {
+                            'Data': html_body,
+                            'Charset': 'UTF-8'
+                        }
+                    }
+                }
+            )
+            
+            logger.info(f"Password reset code email sent to {to_email}", context={
+                "message_id": response.get('MessageId'),
+                "code_length": len(reset_code)
+            })
+            return True
+            
+        except ClientError as e:
+            logger.error(f"Failed to send password reset code email", error=e, context={
+                "to_email": to_email,
+                "error_code": e.response['Error']['Code']
+            })
+            return False
+        except Exception as e:
+            logger.error(f"Unexpected error sending password reset code email", error=e)
+            return False
+    
     def send_verification_email(self, to_email: str, verification_token: str, user_name: str = None) -> bool:
         """Send email verification email"""
         try:

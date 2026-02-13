@@ -255,6 +255,14 @@ def handle_auth(event, context, method, path, origin):
         elif path == 'auth/change-password' and method == 'POST':
             return handle_change_password(event, context)
         
+        # POST /auth/change-password/request-code - Request verification code for password change (requires auth)
+        elif path == 'auth/change-password/request-code' and method == 'POST':
+            return handle_request_password_change_code(event, context)
+        
+        # POST /auth/change-password/confirm - Confirm password change with verification code (requires auth)
+        elif path == 'auth/change-password/confirm' and method == 'POST':
+            return handle_confirm_password_change(event, context)
+        
         # POST /auth/password-reset/request - Request password reset
         elif path == 'auth/password-reset/request' and method == 'POST':
             from validation import Validator
@@ -277,16 +285,17 @@ def handle_auth(event, context, method, path, origin):
         elif path == 'auth/password-reset/confirm' and method == 'POST':
             from validation import Validator
             
-            reset_token = Validator.required(body, 'reset_token')
+            email = Validator.required(body, 'email')
+            reset_code = Validator.required(body, 'code')
             new_password = Validator.required(body, 'new_password')
             
             auth_service = EmailAuthService()
-            success, error = auth_service.reset_password(reset_token, new_password)
+            success, error = auth_service.reset_password(email, reset_code, new_password)
             
             if success:
                 return APIResponse.success({"message": "Password reset successful"}, origin=origin)
             else:
-                return APIResponse.error(error, origin=origin)
+                return APIResponse.error(error, status_code=400, origin=origin)
         
         # POST /auth/verify-email - Verify email with 4-digit code
         elif path == 'auth/verify-email' and method == 'POST':
@@ -677,6 +686,102 @@ def handle_change_password(event, context, user_id):
         return APIResponse.server_error(origin=origin)
 
 
+@require_auth()
+def handle_request_password_change_code(event, context, user_id):
+    """Request verification code for password change (authenticated)"""
+    origin = get_origin(event)
+    
+    try:
+        import boto3
+        from email_auth import EmailAuthService
+        
+        # Get user's email
+        dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+        users_table = dynamodb.Table(config.TABLE_USERS)
+        
+        user_response = users_table.get_item(Key={"user_id": user_id})
+        if 'Item' not in user_response:
+            return APIResponse.error("User not found", status_code=404, origin=origin)
+        
+        user_data = user_response['Item']
+        email = user_data.get("email")
+        
+        if not email:
+            return APIResponse.error("User does not have an email", status_code=400, origin=origin)
+        
+        # Request verification code
+        auth_service = EmailAuthService()
+        success, error = auth_service.request_password_change_verification(user_id, email)
+        
+        if success:
+            logger.info("Password change verification code sent", context={"user_id": user_id, "email": email})
+            return APIResponse.success(
+                {"message": "Verification code sent to your email"},
+                origin=origin
+            )
+        else:
+            logger.error("Failed to send password change verification code", context={"user_id": user_id, "error": error})
+            return APIResponse.error(error or "Failed to send verification code", status_code=500, origin=origin)
+    
+    except Exception as e:
+        logger.error("Request password change code error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_confirm_password_change(event, context, user_id):
+    """Confirm password change with verification code (authenticated)"""
+    origin = get_origin(event)
+    
+    try:
+        body = validate_request_body(event.get('body'))
+        from validation import Validator
+        from email_auth import EmailAuthService
+        import boto3
+        
+        verification_code = Validator.required(body, 'code')
+        new_password = Validator.required(body, 'new_password')
+        
+        # Get user's email
+        dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+        users_table = dynamodb.Table(config.TABLE_USERS)
+        
+        user_response = users_table.get_item(Key={"user_id": user_id})
+        if 'Item' not in user_response:
+            return APIResponse.error("User not found", status_code=404, origin=origin)
+        
+        user_data = user_response['Item']
+        email = user_data.get("email")
+        
+        if not email:
+            return APIResponse.error("User does not have an email", status_code=400, origin=origin)
+        
+        # Confirm password change with code
+        auth_service = EmailAuthService()
+        success, error = auth_service.confirm_password_change_with_code(
+            user_id, 
+            email, 
+            verification_code, 
+            new_password
+        )
+        
+        if success:
+            logger.info("Password changed successfully with verification code", context={"user_id": user_id})
+            return APIResponse.success(
+                {"message": "Password changed successfully"},
+                origin=origin
+            )
+        else:
+            logger.error("Failed to change password with verification code", context={"user_id": user_id, "error": error})
+            return APIResponse.error(error or "Failed to change password", status_code=400, origin=origin)
+    
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, origin)
+    except Exception as e:
+        logger.error("Confirm password change error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
 # ==================== GAME HANDLERS ====================
 
 def handle_game(event, context, method, path, origin):
@@ -685,6 +790,10 @@ def handle_game(event, context, method, path, origin):
         # GET /player/profile - Get player profile
         if path == 'player/profile' and method == 'GET':
             return handle_player_profile(event, context)
+
+        # PUT /player/profile - Update player profile
+        elif path == 'player/profile' and method == 'PUT':
+            return handle_update_player_profile(event, context)
 
         # POST /game/session/start - Unity compatibility
         elif path == 'game/session/start' and method == 'POST':
@@ -841,7 +950,7 @@ def handle_player_profile(event, context, user_id):
         # Combine user and player data
         profile = {
             'user_id': user_id,
-            'username': user.get('email', '').split('@')[0],
+            'username': user.get('username') or user.get('email', '').split('@')[0],
             'email': user.get('email'),
             'wallet_address': user.get('wallet_address'),
             'level': player_data.get('level', 1),
@@ -866,6 +975,59 @@ def handle_player_profile(event, context, user_id):
     
     except Exception as e:
         logger.error("Player profile error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_update_player_profile(event, context, user_id):
+    """Update player profile (username)"""
+    origin = get_origin(event)
+    
+    try:
+        import boto3
+        
+        body = validate_request_body(event.get('body'))
+        
+        # Only allow username updates for now
+        username = body.get('username')
+        
+        if not username:
+            return APIResponse.error("Username is required", status_code=400, origin=origin)
+        
+        # Validate username
+        username = username.strip()
+        if len(username) < 3 or len(username) > 20:
+            return APIResponse.error("Username must be 3-20 characters", status_code=400, origin=origin)
+        
+        # Check if username contains only valid characters (alphanumeric, underscore, hyphen)
+        import re
+        if not re.match(r'^[a-zA-Z0-9_-]+$', username):
+            return APIResponse.error("Username can only contain letters, numbers, underscores, and hyphens", status_code=400, origin=origin)
+        
+        dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+        users_table = dynamodb.Table(config.TABLE_USERS)
+        
+        # Update username in users table
+        users_table.update_item(
+            Key={'user_id': user_id},
+            UpdateExpression='SET username = :username, updated_at = :updated_at',
+            ExpressionAttributeValues={
+                ':username': username,
+                ':updated_at': now_iso()
+            }
+        )
+        
+        logger.info("Username updated", context={"user_id": user_id, "username": username})
+        
+        return APIResponse.success({
+            'message': 'Username updated successfully',
+            'username': username
+        }, origin=origin)
+    
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, origin)
+    except Exception as e:
+        logger.error("Update profile error", error=e, user_id=user_id)
         return APIResponse.server_error(origin=origin)
 
 

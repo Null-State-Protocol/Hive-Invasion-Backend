@@ -238,7 +238,7 @@ class EmailAuthService:
     
     def request_password_reset(self, email: str) -> Tuple[bool, Optional[str]]:
         """
-        Request password reset
+        Request password reset with 4-digit code
         
         Returns:
             (success, error_message)
@@ -254,32 +254,35 @@ class EmailAuthService:
             
             user_id = response["Item"]["user_id"]
             
-            # Generate reset token
+            # Generate 4-digit reset code
+            reset_code = TokenGenerator.generate_verification_code(length=4)
+            # Generate a unique token for DynamoDB primary key
             reset_token = TokenGenerator.generate_token(32)
             now = now_iso()
             expires = (datetime.now(timezone.utc) + timedelta(hours=config.PASSWORD_RESET_EXPIRE_HOURS)).isoformat()
             
-            # Store reset token
+            # Store reset code (token as primary key for DB compatibility, email for lookups)
             self.password_reset_table.put_item(Item={
-                "token": reset_token,  # Primary key
+                "token": reset_token,  # Primary key (required by existing table)
                 "email": email,
+                "code": reset_code,
                 "user_id": user_id,
                 "created_at": now,
                 "expires_at": expires,
                 "is_used": False
             })
             
-            # Send reset email
+            # Send reset email with 4-digit code
             try:
-                logger.info(f"Sending password reset email to {email}")
-                self.email_service.send_password_reset_email(email, reset_token)
-                logger.info(f"Password reset email sent successfully to {email}")
+                logger.info(f"Sending password reset code to {email}")
+                self.email_service.send_password_reset_code_email(email, reset_code)
+                logger.info(f"Password reset code sent successfully to {email}")
             except Exception as email_error:
                 logger.error(f"Failed to send password reset email to {email}", error=email_error, context={
                     "error_type": type(email_error).__name__,
                     "error_message": str(email_error)
                 })
-                # Continue anyway - token is stored
+                # Continue anyway - code is stored
             
             logger.info("Password reset requested", context={"email": email})
             
@@ -296,37 +299,47 @@ class EmailAuthService:
     
     def reset_password(
         self,
-        reset_token: str,
+        email: str,
+        reset_code: str,
         new_password: str
     ) -> Tuple[bool, Optional[str]]:
         """
-        Reset password using reset token
+        Reset password using 4-digit code
         
         Returns:
             (success, error_message)
         """
         try:
+            email = email.lower().strip()
+            
             # Validate new password
             is_strong, password_error = PasswordHasher.validate_password_strength(new_password)
             if not is_strong:
                 return False, password_error
             
-            # Find reset token using primary key
-            response = self.password_reset_table.get_item(Key={"token": reset_token})
+            # Find reset code by scanning for email (since token is primary key)
+            response = self.password_reset_table.scan(
+                FilterExpression="email = :email AND is_used = :false",
+                ExpressionAttributeValues={
+                    ":email": email,
+                    ":false": False
+                }
+            )
             
-            if "Item" not in response:
-                return False, "Invalid or expired reset token"
+            if not response.get("Items"):
+                return False, "Invalid or expired reset code"
             
-            reset_data = response["Item"]
+            # Get the most recent reset code for this email
+            reset_data = sorted(response["Items"], key=lambda x: x.get("created_at", ""), reverse=True)[0]
             
-            # Check if already used
-            if reset_data.get("is_used"):
-                return False, "Reset token already used"
+            # Check if code matches
+            if reset_data.get("code") != reset_code:
+                return False, "Invalid reset code"
             
             # Check if expired
             expires_at = datetime.fromisoformat(reset_data["expires_at"])
             if expires_at < datetime.now(timezone.utc):
-                return False, "Reset token has expired"
+                return False, "Reset code has expired"
             
             # Update password
             user_id = reset_data["user_id"]
@@ -341,14 +354,14 @@ class EmailAuthService:
                 }
             )
             
-            # Mark token as used
+            # Mark code as used
             self.password_reset_table.update_item(
-                Key={"token": reset_token},  # Use token as primary key
+                Key={"token": reset_data["token"]},  # Use token as primary key
                 UpdateExpression="SET is_used = :true",
                 ExpressionAttributeValues={":true": True}
             )
             
-            logger.info("Password reset successful", context={"user_id": user_id})
+            logger.info("Password reset successful", context={"user_id": user_id, "email": email})
             
             return True, None
         
@@ -592,3 +605,165 @@ class EmailAuthService:
                 "Failed to send verification code",
                 context={"email": email, "user_id": user_id}
             )
+    
+    def request_password_change_verification(self, user_id: str, email: str) -> Tuple[bool, Optional[str]]:
+        """
+        Request a verification code for authenticated password change
+        Sends 4-digit code to user's email
+        
+        Args:
+            user_id: Authenticated user ID
+            email: User's email address
+        
+        Returns:
+            (success, error_message)
+        """
+        try:
+            email = email.lower().strip()
+            
+            # Verify user exists and email matches
+            user_response = self.users_table.get_item(Key={"user_id": user_id})
+            if "Item" not in user_response:
+                return False, "User not found"
+            
+            user_data = user_response["Item"]
+            if user_data.get("email", "").lower() != email:
+                return False, "Email does not match user account"
+            
+            # Generate 4-digit verification code
+            verification_code = TokenGenerator.generate_verification_code(length=4)
+            now = now_iso()
+            expires_at = (datetime.now(timezone.utc) + timedelta(minutes=15)).isoformat()
+            
+            # Store verification code in email_verification table
+            # Using email as primary key (same table as registration verification)
+            self.verification_table.put_item(Item={
+                "email": email,
+                "code": verification_code,
+                "user_id": user_id,
+                "created_at": now,
+                "expires_at": expires_at,
+                "is_used": False,
+                "purpose": "password_change"  # To distinguish from registration
+            })
+            
+            # Send verification email
+            try:
+                send_success = self.email_service.send_verification_code_email(
+                    email, 
+                    verification_code
+                )
+                if send_success:
+                    logger.info(
+                        "Password change verification code sent",
+                        context={"email": email, "user_id": user_id}
+                    )
+                else:
+                    logger.error(
+                        "Failed to send password change verification code",
+                        context={"email": email, "user_id": user_id}
+                    )
+                    return False, "Failed to send verification code"
+            except Exception as email_error:
+                logger.error(
+                    "Failed to send password change verification email",
+                    error=email_error,
+                    context={"email": email, "user_id": user_id}
+                )
+                return False, "Failed to send verification code"
+            
+            return True, None
+        
+        except Exception as e:
+            logger.error("Request password change verification failed", error=e)
+            return False, "Failed to request verification code"
+    
+    def confirm_password_change_with_code(
+        self, 
+        user_id: str, 
+        email: str, 
+        verification_code: str, 
+        new_password: str
+    ) -> Tuple[bool, Optional[str]]:
+        """
+        Confirm password change with verification code
+        
+        Args:
+            user_id: Authenticated user ID
+            email: User's email address
+            verification_code: 4-digit verification code
+            new_password: New password
+        
+        Returns:
+            (success, error_message)
+        """
+        try:
+            email = email.lower().strip()
+            verification_code = verification_code.strip()
+            
+            # Validate new password strength
+            is_strong, password_error = PasswordHasher.validate_password_strength(new_password)
+            if not is_strong:
+                return False, password_error
+            
+            # Verify user exists and email matches
+            user_response = self.users_table.get_item(Key={"user_id": user_id})
+            if "Item" not in user_response:
+                return False, "User not found"
+            
+            user_data = user_response["Item"]
+            if user_data.get("email", "").lower() != email:
+                return False, "Email does not match user account"
+            
+            # Get verification data
+            response = self.verification_table.get_item(Key={"email": email})
+            verification_data = response.get("Item")
+            
+            if not verification_data:
+                return False, "No verification code found. Please request a new code."
+            
+            # Check if already used
+            if verification_data.get("is_used"):
+                return False, "Verification code already used. Please request a new code."
+            
+            # Check if expired
+            expires_at = datetime.fromisoformat(verification_data["expires_at"])
+            if expires_at < datetime.now(timezone.utc):
+                return False, "Verification code has expired. Please request a new code."
+            
+            # Verify code matches
+            if verification_data.get("code") != verification_code:
+                return False, "Invalid verification code"
+            
+            # Verify the verification code belongs to this user
+            if verification_data.get("user_id") != user_id:
+                return False, "Verification code does not match user"
+            
+            # Update password
+            password_hash = PasswordHasher.hash_password(new_password)
+            self.users_table.update_item(
+                Key={"user_id": user_id},
+                UpdateExpression="SET password_hash = :hash, updated_at = :now",
+                ExpressionAttributeValues={
+                    ":hash": password_hash,
+                    ":now": now_iso()
+                }
+            )
+            
+            # Mark verification code as used
+            self.verification_table.update_item(
+                Key={"email": email},
+                UpdateExpression="SET is_used = :true",
+                ExpressionAttributeValues={":true": True}
+            )
+            
+            logger.info(
+                "Password changed successfully with verification code",
+                context={"user_id": user_id, "email": email}
+            )
+            
+            return True, None
+        
+        except Exception as e:
+            logger.error("Confirm password change failed", error=e)
+            return False, "Failed to change password"
