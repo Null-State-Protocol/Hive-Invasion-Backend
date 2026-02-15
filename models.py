@@ -1020,6 +1020,15 @@ def set_dust(user_id, value):
 def update_high_score(user_id, high_score):
     """
     Update player's high score if higher than current.
+    
+    Server-side comparison: only updates if new score is better.
+    
+    Args:
+        user_id: User UUID
+        high_score: New score to compare
+    
+    Returns:
+        int: The current high score (either existing or newly updated)
     """
     table = dynamodb.Table('hive_player_data')
     now = datetime.now(timezone.utc).isoformat()
@@ -1027,8 +1036,12 @@ def update_high_score(user_id, high_score):
     player_data = response.get('Item', {})
     current = int(player_data.get('high_score', 0))
     new_score = int(high_score)
-    if new_score < current:
+    
+    # Server decides: only update if new score is higher
+    if new_score <= current:
         return current
+    
+    # Update to new high score
     table.update_item(
         Key={'user_id': user_id},
         UpdateExpression='SET high_score = :score, updated_at = :now',

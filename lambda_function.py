@@ -1340,16 +1340,41 @@ def handle_update_dust(event, context, user_id):
 
 @require_auth()
 def handle_update_high_score(event, context, user_id):
-    """Update player's high score"""
+    """
+    Update player's high score.
+    Server-side comparison: only updates if new score is higher.
+    Also updates leaderboard to keep data synchronized.
+    """
     origin = get_origin(event)
     try:
-        from models import update_high_score
+        from models import update_high_score, update_leaderboard
         from validation import Validator
 
         body = validate_request_body(event.get('body'))
         high_score = int(Validator.required(body, 'high_score'))
+        
+        # Validate score
+        if high_score < 0:
+            return APIResponse.validation_error('high_score', 'Score cannot be negative', origin)
+        
+        # Update high score (server-side comparison)
         new_score = update_high_score(user_id, high_score)
-        return APIResponse.success({'high_score': new_score}, origin=origin)
+        score_updated = new_score > 0 and new_score == high_score  # Updated if returned score equals input
+        
+        # Update leaderboard to keep synchronized
+        leaderboard_updated = False
+        if score_updated:
+            try:
+                leaderboard_updated = update_leaderboard(user_id, high_score, 'alltime')
+                logger.info("Leaderboard updated", user_id=user_id, score=high_score, updated=leaderboard_updated)
+            except Exception as e:
+                logger.warning("Leaderboard update failed", error=e, user_id=user_id)
+        
+        return APIResponse.success({
+            'high_score': new_score,
+            'updated': score_updated,
+            'leaderboard_updated': leaderboard_updated
+        }, origin=origin)
     except ValidationError as e:
         return APIResponse.validation_error(e.field, e.message, origin)
     except Exception as e:
@@ -1789,12 +1814,17 @@ def handle_session_end(event, context, user_id, path):
         progression = update_player_progression(user_id, score, xp_earned, gold_earned)
         
         # Update dust
-        from models import update_dust
+        from models import update_dust, update_high_score
         new_dust = update_dust(user_id, dust_earned)
         
-        # Update leaderboards
+        # Update high score (server-side comparison)
+        new_high_score = update_high_score(user_id, score)
+        
+        # Update leaderboards (synchronized with high_score)
+        leaderboard_updated = False
         try:
-            update_leaderboard(user_id, score, 'alltime')
+            leaderboard_updated = update_leaderboard(user_id, score, 'alltime')
+            logger.info("Session end - leaderboard updated", user_id=user_id, score=score, updated=leaderboard_updated)
         except Exception as e:
             logger.warning(f"Leaderboard update failed: {str(e)}")
         
@@ -1827,7 +1857,8 @@ def handle_session_end_by_body(event, context, user_id):
         end_game_session,
         update_player_progression,
         update_leaderboard,
-        update_dust
+        update_dust,
+        update_high_score
     )
 
     try:
@@ -1880,9 +1911,15 @@ def handle_session_end_by_body(event, context, user_id):
 
         progression = update_player_progression(user_id, score, xp_earned, gold_earned)
         new_dust = update_dust(user_id, dust_earned)
+        
+        # Update high score (server-side comparison)
+        new_high_score = update_high_score(user_id, score)
 
+        # Update leaderboards (synchronized with high_score)
+        leaderboard_updated = False
         try:
-            update_leaderboard(user_id, score, 'alltime')
+            leaderboard_updated = update_leaderboard(user_id, score, 'alltime')
+            logger.info("Session end - leaderboard updated", user_id=user_id, score=score, updated=leaderboard_updated)
         except Exception as e:
             logger.warning(f"Leaderboard update failed: {str(e)}")
 
