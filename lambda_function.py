@@ -313,11 +313,14 @@ def handle_auth(event, context, method, path, origin):
             success, data, error = auth_service.verify_email(email, verification_code, return_token=return_token)
             
             if success:
-                if return_token and data:
-                    # 2-step login flow - return user data and tokens
+                # NEW: verify_email now returns user+tokens for both registration and 2-step login
+                # Registration: Account is created during verification
+                # 2-step login: User already exists, just verify and login
+                if data and ('user' in data or 'tokens' in data):
+                    # Return user data and tokens for immediate login
                     return APIResponse.success(data, origin=origin)
                 else:
-                    # Registration flow - just confirmation
+                    # Fallback for old flow (shouldn't happen with new implementation)
                     return APIResponse.success({"message": "Email verified successfully"}, origin=origin)
             else:
                 return APIResponse.error(error, status_code=400, origin=origin)
