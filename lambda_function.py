@@ -373,6 +373,10 @@ def handle_auth(event, context, method, path, origin):
         else:
             return APIResponse.not_found("Auth endpoint", origin)
     
+    except ValidationError as e:
+        logger.warning(f"Validation error in auth: {e.message}", context={"field": e.field})
+        return APIResponse.validation_error(e.field, e.message, origin)
+    
     except Exception as e:
         import traceback
         logger.error("Auth handler error", error=e, context={
