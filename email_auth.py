@@ -38,7 +38,13 @@ class EmailAuthService:
     ) -> Tuple[bool, Optional[Dict], Optional[str]]:
         """
         Register a new user with email and password (both required)
-        Email verification is required before account is fully activated
+        Account is NOT created until email is verified with the code
+        
+        Flow:
+        1. Validate email and password
+        2. Store pending registration in verification table
+        3. Send verification code
+        4. User must call verify_email() to complete registration
         
         Returns:
             (success, user_data, error_message)
@@ -61,84 +67,68 @@ class EmailAuthService:
                 print(f"[REGISTER] Password validation failed: {password_error}")
                 return False, None, password_error
             
-            # Check if email already exists
+            # Check if email already exists as verified user
             try:
                 logger.debug("Checking if email exists", context={"email": email})
                 print(f"[REGISTER] Checking if email exists...")
                 response = self.user_emails_table.get_item(Key={"email": email})
                 if "Item" in response:
-                    # Email exists - check if verified
-                    existing_user_id = response["Item"]["user_id"]
-                    user_response = self.users_table.get_item(Key={"user_id": existing_user_id})
-                    if user_response.get("Item", {}).get("email_verified"):
-                        logger.info("Registration attempt with existing verified email", context={"email": email, "user_id": existing_user_id})
-                        print(f"[REGISTER] Email already registered and verified")
-                        return False, None, "Email already registered"
-                    else:
-                        # Email exists but not verified - resend code
-                        logger.info("Resending verification code for unverified email", context={"email": email, "user_id": existing_user_id})
-                        print(f"[REGISTER] Email exists but not verified - resending code")
-                        self._send_verification_email(email, existing_user_id, resend=True)
-                        return True, {
-                            "user": {"user_id": existing_user_id, "email": email},
-                            "email_verification_required": True,
-                            "message": "Verification code resent"
-                        }, None
+                    # Email already registered and account created
+                    logger.info("Registration attempt with existing email", context={"email": email})
+                    print(f"[REGISTER] Email already registered")
+                    return False, None, "Email already registered"
             except ClientError as e:
                 logger.error("Error checking email existence", error=e, context={"email": email})
                 print(f"[REGISTER] Error checking email: {e}")
                 pass
             
-            # Create user
-            logger.debug("Creating new user", context={"email": email})
-            print(f"[REGISTER] Creating user...")
+            # Generate temporary user_id for pending registration
+            logger.debug("Creating pending registration", context={"email": email})
+            print(f"[REGISTER] Creating pending registration...")
             user_id = str(uuid.uuid4())
             password_hash = PasswordHasher.hash_password(password)
+            
+            # Generate 4-digit verification code
+            from security import TokenGenerator
+            verification_code = TokenGenerator.generate_verification_code(length=4)
             now = now_iso()
+            expires_at = (datetime.now(timezone.utc) + timedelta(hours=config.EMAIL_VERIFICATION_EXPIRE_HOURS)).isoformat()
             
-            logger.debug("Creating User object", context={"user_id": user_id, "email": email})
-            print(f"[REGISTER] Creating User object...")
-            user = User(
-                user_id=user_id,
-                email=email,
-                password_hash=password_hash,
-                created_at=now,
-                updated_at=now,
-                email_verified=not config.ENABLE_EMAIL_VERIFICATION,
-                require_email_verification=config.ENABLE_EMAIL_VERIFICATION,
-                is_active=True
-            )
-            
-            # Store in users table
-            logger.debug("Storing user in database", context={"user_id": user_id})
-            print(f"[REGISTER] Storing in users table...")
-            self.users_table.put_item(Item=user.to_db_item())
-            
-            # Store email -> user_id mapping
-            logger.debug("Storing email mapping", context={"email": email, "user_id": user_id})
-            print(f"[REGISTER] Storing email mapping...")
-            self.user_emails_table.put_item(Item={
+            # Store pending registration in verification table
+            # IMPORTANT: Account is NOT created yet - only pending data stored
+            logger.debug("Storing pending registration", context={"email": email, "user_id": user_id})
+            print(f"[REGISTER] Storing pending registration data...")
+            self.verification_table.put_item(Item={
                 "email": email,
+                "code": verification_code,
                 "user_id": user_id,
-                "created_at": now
+                "password_hash": password_hash,  # Store hashed password for account creation later
+                "created_at": now,
+                "expires_at": expires_at,
+                "is_used": False,
+                "purpose": "registration"  # Distinguish from login verification
             })
             
             logger.info(
-                "User registered",
+                "Pending registration created",
                 context={"user_id": user_id, "email": email}
             )
             
-            # Send verification email if enabled
-            if config.ENABLE_EMAIL_VERIFICATION and send_verification:
+            # Send verification email
+            if send_verification:
                 logger.info("Sending verification email", context={"user_id": user_id, "email": email})
                 print(f"[REGISTER] Sending verification email...")
-                self._send_verification_email(email, user_id)
+                send_success = self.email_service.send_verification_code_email(email, verification_code)
+                if not send_success:
+                    logger.error("Failed to send verification code", context={"email": email})
+                    return False, None, "Failed to send verification code. Please try again."
             
-            logger.info("User registration successful", context={"user_id": user_id, "email": email, "email_verification_required": config.ENABLE_EMAIL_VERIFICATION})
-            print(f"[REGISTER] Registration successful!")
+            logger.info("Registration pending verification", context={"user_id": user_id, "email": email})
+            print(f"[REGISTER] Verification code sent! Account will be created after verification.")
             return True, {
-                "user": {"user_id": user_id, "email": email},
-                "email_verification_required": config.ENABLE_EMAIL_VERIFICATION
+                "email": email,
+                "message": "Verification code sent. Please check your email to complete registration.",
+                "email_verification_required": True
             }, None
         
         except Exception as e:
@@ -371,18 +361,18 @@ class EmailAuthService:
     
     def verify_email(self, email: str, verification_code: str, return_token: bool = False) -> Tuple[bool, Optional[Dict], Optional[str]]:
         """
-        Verify email using 4-digit code
+        Verify email using 4-digit code and CREATE the account
         
         Args:
             email: User email
             verification_code: 4-digit verification code
             return_token: If True, returns JWT tokens for immediate login (2-step login flow)
-                         If False, just marks email as verified (registration flow)
+                         If False, just creates account (registration flow)
         
         Returns:
             (success, data, error_message)
-            - For registration: (True, None, None)
-            - For 2-step login: (True, {user, tokens}, None)
+            - For registration: (True, {user, tokens}, None) - account created
+            - For 2-step login: (True, {user, tokens}, None) - login successful
         """
         try:
             email = email.lower().strip()
@@ -399,39 +389,99 @@ class EmailAuthService:
             
             # Check if already used
             if verification_data.get("is_used"):
-                return False, None, "Email already verified"
+                return False, None, "Verification code already used"
             
             # Check if expired
             expires_at = datetime.fromisoformat(verification_data["expires_at"])
             if expires_at < datetime.now(timezone.utc):
-                return False, None, "Verification code has expired. Please request a new one."
+                return False, None, "Verification code has expired. Please register again."
             
             # Verify code
             if verification_data.get("code") != verification_code:
                 return False, None, "Invalid verification code"
             
-            # Update user
             user_id = verification_data["user_id"]
-            self.users_table.update_item(
-                Key={"user_id": user_id},
-                UpdateExpression="SET email_verified = :true, updated_at = :now",
-                ExpressionAttributeValues={
-                    ":true": True,
-                    ":now": now_iso()
-                }
-            )
+            purpose = verification_data.get("purpose", "login")
             
-            # Mark code as used
-            self.verification_table.update_item(
-                Key={"email": email},
-                UpdateExpression="SET is_used = :true",
-                ExpressionAttributeValues={":true": True}
-            )
+            # REGISTRATION FLOW: Create the account now
+            if purpose == "registration":
+                logger.info("Creating account after verification", context={"user_id": user_id, "email": email})
+                print(f"[VERIFY] Creating account for {email}...")
+                
+                # Get password hash from verification data
+                password_hash = verification_data.get("password_hash")
+                if not password_hash:
+                    logger.error("No password hash found in verification data", context={"email": email})
+                    return False, None, "Invalid verification data. Please register again."
+                
+                now = now_iso()
+                
+                # Create user account NOW (after verification)
+                user = User(
+                    user_id=user_id,
+                    email=email,
+                    password_hash=password_hash,
+                    created_at=now,
+                    updated_at=now,
+                    email_verified=True,  # Already verified
+                    require_email_verification=False,  # No need to verify again
+                    is_active=True,
+                    last_login_at=now
+                )
+                
+                # Store in users table
+                logger.debug("Storing user in database", context={"user_id": user_id})
+                print(f"[VERIFY] Storing user in database...")
+                self.users_table.put_item(Item=user.to_db_item())
+                
+                # Store email -> user_id mapping
+                logger.debug("Storing email mapping", context={"email": email, "user_id": user_id})
+                self.user_emails_table.put_item(Item={
+                    "email": email,
+                    "user_id": user_id,
+                    "created_at": now
+                })
+                
+                # Mark code as used
+                self.verification_table.update_item(
+                    Key={"email": email},
+                    UpdateExpression="SET is_used = :true",
+                    ExpressionAttributeValues={":true": True}
+                )
+                
+                # Create auth tokens for immediate login
+                tokens = JWTHandler.create_token_pair(user_id)
+                
+                logger.info("Account created and verified successfully", context={"user_id": user_id, "email": email})
+                print(f"[VERIFY] Account created successfully!")
+                
+                return True, {
+                    "user": user.to_dict(),
+                    "tokens": tokens,
+                    "message": "Account created successfully!"
+                }, None
             
-            logger.info("Email verified", context={"user_id": user_id, "email": email, "return_token": return_token})
-            
-            # If return_token is True, generate JWT tokens for 2-step login
-            if return_token:
+            # 2-STEP LOGIN FLOW: User already exists, just verify and login
+            else:
+                logger.info("2-step login verification", context={"user_id": user_id, "email": email})
+                
+                # Update user email_verified
+                self.users_table.update_item(
+                    Key={"user_id": user_id},
+                    UpdateExpression="SET email_verified = :true, last_login_at = :now, updated_at = :now",
+                    ExpressionAttributeValues={
+                        ":true": True,
+                        ":now": now_iso()
+                    }
+                )
+                
+                # Mark code as used
+                self.verification_table.update_item(
+                    Key={"email": email},
+                    UpdateExpression="SET is_used = :true",
+                    ExpressionAttributeValues={":true": True}
+                )
+                
                 # Get full user data
                 user_response = self.users_table.get_item(Key={"user_id": user_id})
                 if "Item" not in user_response:
@@ -440,30 +490,25 @@ class EmailAuthService:
                 user_data = user_response["Item"]
                 user = User(**user_data)
                 
-                # Update last login
-                self.users_table.update_item(
-                    Key={"user_id": user_id},
-                    UpdateExpression="SET last_login_at = :now",
-                    ExpressionAttributeValues={":now": now_iso()}
-                )
-                
                 # Create auth tokens
                 tokens = JWTHandler.create_token_pair(user_id)
+                
+                logger.info("Email verified and logged in", context={"user_id": user_id, "email": email})
                 
                 return True, {
                     "user": user.to_dict(),
                     "tokens": tokens
                 }, None
-            
-            # Registration flow - just return success
-            return True, None, None
         
         except Exception as e:
             logger.error("Email verification failed", error=e)
+            import traceback
+            print(f"[VERIFY] Exception: {traceback.format_exc()}")
             return False, None, "Failed to verify email"
     
     def resend_verification_code(self, email: str) -> Tuple[bool, Optional[str]]:
-        """\n        Resend verification code (same code, not a new one)
+        """
+        Resend verification code (generate new code if expired)
         
         Returns:
             (success, error_message)
@@ -484,22 +529,49 @@ class EmailAuthService:
             if verification_data.get("is_used"):
                 return False, "Email already verified"
             
+            user_id = verification_data["user_id"]
+            password_hash = verification_data.get("password_hash")  # For registration flow
+            purpose = verification_data.get("purpose", "login")
+            
             # Check if expired
             expires_at = datetime.fromisoformat(verification_data["expires_at"])
             if expires_at < datetime.now(timezone.utc):
                 # Generate new code if expired
-                user_id = verification_data["user_id"]
-                self._send_verification_email(email, user_id, resend=True)
-                return True, None
+                from security import TokenGenerator
+                verification_code = TokenGenerator.generate_verification_code(length=4)
+                now = now_iso()
+                new_expires_at = (datetime.now(timezone.utc) + timedelta(hours=config.EMAIL_VERIFICATION_EXPIRE_HOURS)).isoformat()
+                
+                # Update with new code and expiry
+                update_expr = "SET code = :code, expires_at = :expires, created_at = :now"
+                expr_values = {
+                    ":code": verification_code,
+                    ":expires": new_expires_at,
+                    ":now": now
+                }
+                
+                # Keep password_hash if this is a registration
+                if password_hash:
+                    update_expr += ", password_hash = :hash, purpose = :purpose"
+                    expr_values[":hash"] = password_hash
+                    expr_values[":purpose"] = purpose
+                
+                self.verification_table.update_item(
+                    Key={"email": email},
+                    UpdateExpression=update_expr,
+                    ExpressionAttributeValues=expr_values
+                )
+            else:
+                # Use existing code
+                verification_code = verification_data.get("code")
             
-            # Resend same code
-            verification_code = verification_data.get("code")
+            # Send verification email
             send_success = self.email_service.send_verification_code_email(email, verification_code)
             
             if send_success:
                 logger.info(
                     "Verification code resent",
-                    context={"email": email, "user_id": verification_data["user_id"]}
+                    context={"email": email, "user_id": user_id}
                 )
                 return True, None
             else:
@@ -573,38 +645,6 @@ class EmailAuthService:
         except Exception as e:
             logger.error("Complete registration failed", error=e)
             return False, None, "Failed to complete registration"
-    
-    def _send_verification_email(self, email: str, user_id: str, resend: bool = False):
-        """Send verification email with 4-digit code"""
-        from security import TokenGenerator
-        
-        # Generate 4-digit verification code
-        verification_code = TokenGenerator.generate_verification_code(length=4)
-        now = now_iso()
-        expires_at = (datetime.now(timezone.utc) + timedelta(hours=config.EMAIL_VERIFICATION_EXPIRE_HOURS)).isoformat()
-        
-        # Store verification code (email is partition key)
-        self.verification_table.put_item(Item={
-            "email": email,
-            "code": verification_code,
-            "user_id": user_id,
-            "created_at": now,
-            "expires_at": expires_at,
-            "is_used": False
-        })
-        
-        # Send verification email via SES with 4-digit code
-        send_success = self.email_service.send_verification_code_email(email, verification_code)
-        if send_success:
-            logger.info(
-                "Verification code sent successfully",
-                context={"email": email, "user_id": user_id, "resend": resend}
-            )
-        else:
-            logger.error(
-                "Failed to send verification code",
-                context={"email": email, "user_id": user_id}
-            )
     
     def request_password_change_verification(self, user_id: str, email: str) -> Tuple[bool, Optional[str]]:
         """
