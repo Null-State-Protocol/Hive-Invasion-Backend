@@ -15,7 +15,7 @@ class EmailService:
     
     def __init__(self):
         self.ses = boto3.client('ses', region_name=config.AWS_REGION)
-        self.sender_email = config.SENDER_EMAIL or "noreply@hiveinvasion.games"
+        self.sender_email = config.SENDER_EMAIL or "info@pixcape.games"
     
     def send_password_reset_email(self, to_email: str, reset_token: str, user_name: str = None) -> bool:
         """Send password reset email"""

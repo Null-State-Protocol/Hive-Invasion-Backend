@@ -49,7 +49,7 @@ class Config:
     # Email Configuration
     EMAIL_VERIFICATION_EXPIRE_HOURS = 24
     PASSWORD_RESET_EXPIRE_HOURS = 1
-    SENDER_EMAIL = os.getenv("SENDER_EMAIL", "noreply@hiveinvasion.games")
+    SENDER_EMAIL = os.getenv("SENDER_EMAIL", "info@pixcape.games")
     FRONTEND_URL = os.getenv("FRONTEND_URL", "https://hive-invasion-website.kagan-fa3.workers.dev")
     
     # Account Deletion (GDPR compliance)
