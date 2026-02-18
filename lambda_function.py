@@ -976,7 +976,7 @@ def handle_player_profile(event, context, user_id):
         if 'Item' in player_response:
             player_data = player_response['Item']
         else:
-            # Create default player data
+            # Create default player data with 3 starter keys
             player_data = {
                 'user_id': user_id,
                 'level': 1,
@@ -984,6 +984,11 @@ def handle_player_profile(event, context, user_id):
                 'games_played': 0,
                 'games_won': 0,
                 'highest_wave': 0,
+                'keys_owned': {
+                    'bronze': 3,
+                    'silver': 3,
+                    'gold': 3
+                },
                 'created_at': datetime.now(timezone.utc).isoformat()
             }
             player_table.put_item(Item=player_data)

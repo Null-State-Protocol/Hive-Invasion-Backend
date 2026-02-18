@@ -162,7 +162,7 @@ class EmailAuthService:
             response = self.user_emails_table.get_item(Key={"email": email})
             if "Item" not in response:
                 logger.warning("Login failed - email not found", context={"email": email})
-                return False, None, "Invalid email or password"
+                return False, None, "Email not found. Please register first."
             
             user_id = response["Item"]["user_id"]
             
