@@ -4,7 +4,7 @@ Unified API for mobile and web platforms
 """
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # Import utilities
 from config import config
@@ -573,9 +573,43 @@ def handle_update_2step_setting(event, context, user_id):
         # If send_code requested, send verification code and return
         if send_code:
             from email_auth import EmailAuthService
+            from security import TokenGenerator
             auth_service = EmailAuthService()
-            auth_service._send_verification_email(email, user_id, resend=True)
-            logger.info("2-step toggle verification code sent", context={"user_id": user_id, "email": email})
+            
+            # Try to resend existing code first
+            success, error = auth_service.resend_verification_code(email)
+            
+            # If no verification data exists, create new one
+            if not success and "No verification code found" in str(error):
+                verification_code = TokenGenerator.generate_verification_code(length=4)
+                verification_table = dynamodb.Table(config.TABLE_EMAIL_VERIFICATION)
+                expires_at = (datetime.now(timezone.utc) + timedelta(hours=config.EMAIL_VERIFICATION_EXPIRE_HOURS)).isoformat()
+                
+                # Create verification entry
+                verification_table.put_item(Item={
+                    "email": email,
+                    "user_id": user_id,
+                    "code": verification_code,
+                    "created_at": now_iso(),
+                    "expires_at": expires_at,
+                    "is_used": False,
+                    "purpose": "2step_toggle"
+                })
+                
+                # Send email
+                from email_service import EmailService
+                email_service = EmailService()
+                send_success = email_service.send_verification_code_email(email, verification_code)
+                
+                if not send_success:
+                    return APIResponse.error("Failed to send verification email", status_code=500, origin=origin)
+                
+                logger.info("2-step toggle verification code created and sent", context={"user_id": user_id, "email": email})
+            elif not success:
+                return APIResponse.error(error or "Failed to send verification code", status_code=400, origin=origin)
+            else:
+                logger.info("2-step toggle verification code sent", context={"user_id": user_id, "email": email})
+            
             return APIResponse.success({
                 "message": "Verification code sent to your email",
                 "code_sent": True
