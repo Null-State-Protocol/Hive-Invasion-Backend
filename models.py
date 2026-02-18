@@ -1167,6 +1167,35 @@ def spend_key(user_id, key_type):
     return {'keys_owned': keys_owned}
 
 
+def reward_key(user_id, key_type, amount=1):
+    """
+    Reward keys to player (from gameplay/achievements).
+    Does not require transaction hash.
+    """
+    table = dynamodb.Table('hive_player_data')
+    response = table.get_item(Key={'user_id': user_id})
+    player_data = response.get('Item', {})
+    keys_owned = player_data.get('keys_owned', {})
+    
+    # Ensure keys_owned has all types
+    if not keys_owned:
+        keys_owned = {'bronze': 0, 'silver': 0, 'gold': 0}
+    
+    current = int(keys_owned.get(key_type, 0))
+    keys_owned[key_type] = current + amount
+    
+    now = datetime.now(timezone.utc).isoformat()
+    table.update_item(
+        Key={'user_id': user_id},
+        UpdateExpression='SET keys_owned = :keys, updated_at = :now',
+        ExpressionAttributeValues={
+            ':keys': keys_owned,
+            ':now': now
+        }
+    )
+    return {'keys_owned': keys_owned}
+
+
 def update_achievement_progress(user_id, achievement_id, progress):
     """
     Update achievement progress or create if missing.

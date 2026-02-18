@@ -442,11 +442,15 @@ class EmailAuthService:
                     "created_at": now
                 })
                 
-                # Mark code as used
+                # Mark code as used and verified
                 self.verification_table.update_item(
                     Key={"email": email},
-                    UpdateExpression="SET is_used = :true",
-                    ExpressionAttributeValues={":true": True}
+                    UpdateExpression="SET is_used = :true, verified_status = :verified, verified_at = :now",
+                    ExpressionAttributeValues={
+                        ":true": True,
+                        ":verified": "verified",
+                        ":now": now
+                    }
                 )
                 
                 # Create auth tokens for immediate login
@@ -475,11 +479,16 @@ class EmailAuthService:
                     }
                 )
                 
-                # Mark code as used
+                # Mark code as used and verified
+                now = now_iso()
                 self.verification_table.update_item(
                     Key={"email": email},
-                    UpdateExpression="SET is_used = :true",
-                    ExpressionAttributeValues={":true": True}
+                    UpdateExpression="SET is_used = :true, verified_status = :verified, verified_at = :now",
+                    ExpressionAttributeValues={
+                        ":true": True,
+                        ":verified": "verified",
+                        ":now": now
+                    }
                 )
                 
                 # Get full user data

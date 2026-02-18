@@ -1994,6 +1994,7 @@ def handle_keys(event, context, method, path, origin):
     - POST /keys/purchase
     - POST /keys/replay
     - POST /keys/spend
+    - POST /keys/reward
     - GET /keys/owned
     - GET /keys/history
     """
@@ -2009,6 +2010,10 @@ def handle_keys(event, context, method, path, origin):
         # POST /keys/spend - Spend a key
         elif path == 'keys/spend' and method == 'POST':
             return handle_spend_key(event, context)
+        
+        # POST /keys/reward - Reward keys from gameplay
+        elif path == 'keys/reward' and method == 'POST':
+            return handle_reward_key(event, context)
         
         # GET /keys/owned - Get owned keys
         elif path == 'keys/owned' and method == 'GET':
@@ -2478,4 +2483,32 @@ def handle_spend_key(event, context, user_id):
         return APIResponse.validation_error(e.field, e.message, get_origin(event))
     except Exception as e:
         logger.error("Spend key error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=get_origin(event))
+
+
+@require_auth()
+def handle_reward_key(event, context, user_id):
+    """POST /keys/reward - Reward keys from gameplay"""
+    from models import reward_key
+    from validation import Validator
+
+    try:
+        origin = get_origin(event)
+        body = validate_request_body(event.get('body'))
+        key_type = Validator.required(body, 'key_type').lower()
+        amount = body.get('amount', 1)
+
+        if key_type not in ('bronze', 'silver', 'gold'):
+            return APIResponse.error("Invalid key_type. Must be bronze, silver, or gold.", status_code=400, origin=origin)
+        
+        if not isinstance(amount, int) or amount < 1 or amount > 100:
+            return APIResponse.error("Invalid amount. Must be between 1 and 100.", status_code=400, origin=origin)
+
+        result = reward_key(user_id, key_type, amount)
+        return APIResponse.success(result, origin=origin)
+
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, get_origin(event))
+    except Exception as e:
+        logger.error("Reward key error", error=e, user_id=user_id)
         return APIResponse.server_error(origin=get_origin(event))
