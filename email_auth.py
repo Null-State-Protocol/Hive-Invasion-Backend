@@ -265,14 +265,21 @@ class EmailAuthService:
             # Send reset email with 4-digit code
             try:
                 logger.info(f"Sending password reset code to {email}")
-                self.email_service.send_password_reset_code_email(email, reset_code)
-                logger.info(f"Password reset code sent successfully to {email}")
+                send_success = self.email_service.send_password_reset_code_email(email, reset_code)
+                if send_success:
+                    logger.info(f"Password reset code sent successfully to {email}")
+                else:
+                    logger.error(
+                        "Failed to send password reset code",
+                        context={"email": email, "user_id": user_id}
+                    )
+                    return False, "Failed to send reset code"
             except Exception as email_error:
                 logger.error(f"Failed to send password reset email to {email}", error=email_error, context={
                     "error_type": type(email_error).__name__,
                     "error_message": str(email_error)
                 })
-                # Continue anyway - code is stored
+                return False, "Failed to send reset code"
             
             logger.info("Password reset requested", context={"email": email})
             
