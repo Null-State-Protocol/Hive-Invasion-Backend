@@ -180,18 +180,46 @@ def handle_auth(event, context, method, path, origin):
                 if error and "verify your email" in error.lower():
                     # Send new verification code for 2-step login
                     try:
+                        from security import TokenGenerator
+                        import boto3
+                        from email_service import EmailService
+                        
+                        email_lower = email.lower().strip()
+                        
                         # Get user_id from email
-                        response = auth_service.user_emails_table.get_item(Key={"email": email.lower().strip()})
+                        response = auth_service.user_emails_table.get_item(Key={"email": email_lower})
                         if "Item" in response:
                             user_id = response["Item"]["user_id"]
+                            
+                            # Generate new verification code for 2-step login
+                            verification_code = TokenGenerator.generate_verification_code(length=4)
+                            dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+                            verification_table = dynamodb.Table(config.TABLE_EMAIL_VERIFICATION)
+                            expires_at = (datetime.now(timezone.utc) + timedelta(hours=config.EMAIL_VERIFICATION_EXPIRE_HOURS)).isoformat()
+                            
+                            # Store verification code (overwrites any existing code)
+                            verification_table.put_item(Item={
+                                "email": email_lower,
+                                "user_id": user_id,
+                                "code": verification_code,
+                                "created_at": now_iso(),
+                                "expires_at": expires_at,
+                                "is_used": False,
+                                "purpose": "2step_login"
+                            })
+                            
                             # Send verification email
-                            auth_service._send_verification_email(email.lower().strip(), user_id, resend=True)
-                            logger.info(f"2-step verification code sent for {email}")
-                            return APIResponse.error(
-                                "Email verification required. A verification code has been sent to your email.",
-                                status_code=403,
-                                origin=origin
-                            )
+                            email_service = EmailService()
+                            send_success = email_service.send_verification_code_email(email_lower, verification_code)
+                            
+                            if send_success:
+                                logger.info(f"2-step verification code sent for {email}")
+                                return APIResponse.error(
+                                    "Email verification required. A verification code has been sent to your email.",
+                                    status_code=403,
+                                    origin=origin,
+                                    details={"verification_required": True, "email": email_lower}
+                                )
                     except Exception as e:
                         logger.error("Failed to send verification code on login", error=e)
                 
