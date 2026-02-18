@@ -579,13 +579,14 @@ def handle_update_2step_setting(event, context, user_id):
             # Try to resend existing code first
             success, error = auth_service.resend_verification_code(email)
             
-            # If no verification data exists, create new one
-            if not success and "No verification code found" in str(error):
+            # If no verification data exists OR already verified, create new one
+            # This handles both new users and users re-enabling 2-step after registration
+            if not success and ("No verification code found" in str(error) or "Email already verified" in str(error)):
                 verification_code = TokenGenerator.generate_verification_code(length=4)
                 verification_table = dynamodb.Table(config.TABLE_EMAIL_VERIFICATION)
                 expires_at = (datetime.now(timezone.utc) + timedelta(hours=config.EMAIL_VERIFICATION_EXPIRE_HOURS)).isoformat()
                 
-                # Create verification entry
+                # Create verification entry (overwrites old one if exists)
                 verification_table.put_item(Item={
                     "email": email,
                     "user_id": user_id,
