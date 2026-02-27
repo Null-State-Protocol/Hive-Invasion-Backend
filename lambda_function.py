@@ -19,6 +19,9 @@ from email_auth import EmailAuthService
 from wallet_auth import WalletAuthService
 from jwt_handler import JWTHandler
 
+# Import analytics
+from analytics import AnalyticsService, EventType, track_session_start, track_session_end
+
 # Import game services (to be implemented)
 # achievements import AchievementsService
 # save import SaveService
@@ -1715,11 +1718,118 @@ def handle_player_rank(event, context, user_id):
 
 def handle_analytics(event, context, method, path, origin):
     """Handle analytics endpoints"""
-    # Placeholder for analytics logic
-    return APIResponse.success(
-        {"message": "Analytics endpoints - to be implemented"},
-        origin=origin
-    )
+    try:
+        # POST /analytics/track - Track custom event
+        if path == 'analytics/track' and method == 'POST':
+            return handle_track_event(event, context)
+        
+        # GET /analytics/user/events - Get user events (future)
+        elif path == 'analytics/user/events' and method == 'GET':
+            return APIResponse.success(
+                {"message": "User events endpoint - to be implemented"},
+                origin=origin
+            )
+        
+        # GET /analytics/user/stats - Get user stats (future)
+        elif path == 'analytics/user/stats' and method == 'GET':
+            return APIResponse.success(
+                {"message": "User stats endpoint - to be implemented"},
+                origin=origin
+            )
+        
+        else:
+            return APIResponse.error(
+                f"Unsupported analytics endpoint: {method} {path}",
+                status_code=404,
+                error_code='NOT_FOUND',
+                origin=origin
+            )
+    
+    except Exception as e:
+        logger.error("Analytics handler error", error=e)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_track_event(event, context, user_id):
+    """POST /analytics/track - Track custom analytics event"""
+    origin = get_origin(event)
+    
+    try:
+        body = validate_request_body(event.get('body'))
+        
+        event_type_str = body.get('event_type')
+        event_data_str = body.get('event_data', '{}')
+        session_id = body.get('session_id')
+        platform = body.get('platform', 'unknown')
+        app_version = body.get('app_version', '1.0.0')
+        
+        if not event_type_str:
+            return APIResponse.error(
+                "event_type is required",
+                status_code=400,
+                error_code='MISSING_FIELD',
+                origin=origin
+            )
+        
+        # Validate event type
+        try:
+            event_type = EventType(event_type_str)
+        except ValueError:
+            # Allow custom event types
+            valid_types = [e.value for e in EventType]
+            logger.warning(
+                f"Unknown event_type: {event_type_str}",
+                context={"user_id": user_id, "valid_types": valid_types}
+            )
+            # Use CUSTOM type for unknown events
+            event_type = EventType.CUSTOM
+        
+        # Parse event_data (it comes as JSON string from Unity)
+        try:
+            import json
+            event_data = json.loads(event_data_str) if isinstance(event_data_str, str) else event_data_str
+        except json.JSONDecodeError:
+            logger.warning("Invalid event_data JSON", context={"user_id": user_id})
+            event_data = {"raw": event_data_str}
+        
+        # Track event
+        analytics = AnalyticsService()
+        success = analytics.track_event(
+            user_id=user_id,
+            event_type=event_type,
+            event_data=event_data,
+            session_id=session_id,
+            platform=platform,
+            app_version=app_version
+        )
+        
+        if success:
+            logger.info(
+                f"Analytics event tracked: {event_type_str}",
+                context={
+                    "user_id": user_id,
+                    "event_type": event_type_str,
+                    "session_id": session_id
+                }
+            )
+            return APIResponse.success({
+                "tracked": True,
+                "event_type": event_type_str
+            }, origin=origin)
+        else:
+            return APIResponse.error(
+                "Failed to track event",
+                status_code=500,
+                error_code='TRACKING_FAILED',
+                origin=origin
+            )
+    
+    except ValidationError as e:
+        return APIResponse.validation_error(e.field, e.message, origin)
+    except Exception as e:
+        logger.error("Track event error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
 
 
 # ==================== HEALTH CHECK ====================
@@ -1796,6 +1906,18 @@ def handle_session_start(event, context, user_id):
         
         # Create session
         session = create_game_session(user_id, difficulty, game_mode)
+        
+        # Track session start analytics
+        try:
+            track_session_start(
+                user_id=user_id,
+                session_id=session['session_id'],
+                platform=body.get('platform', 'unity'),
+                app_version=body.get('app_version', '1.0.0')
+            )
+            logger.debug("Session start analytics tracked", context={"session_id": session['session_id']})
+        except Exception as e:
+            logger.warning("Failed to track session start analytics", error=e)
         
         logger.info(f"Session started successfully", context={"session_id": session['session_id'], "user_id": user_id, "difficulty": difficulty, "game_mode": game_mode})
         
@@ -1879,6 +2001,19 @@ def handle_session_end(event, context, user_id, path):
         
         # End the session
         end_game_session(session_id, score, duration_seconds, end_reason)
+        
+        # Track session end analytics
+        try:
+            track_session_end(
+                user_id=user_id,
+                session_id=session_id,
+                duration_seconds=duration_seconds,
+                end_reason=end_reason,
+                final_score=score
+            )
+            logger.debug("Session end analytics tracked", context={"session_id": session_id})
+        except Exception as e:
+            logger.warning("Failed to track session end analytics", error=e)
         
         # Calculate rewards
         xp_earned = int(score * 0.1)
@@ -1979,6 +2114,19 @@ def handle_session_end_by_body(event, context, user_id):
         end_reason = body.get('reason', 'completed')
 
         end_game_session(session_id, score, duration_seconds, end_reason)
+
+        # Track session end analytics
+        try:
+            track_session_end(
+                user_id=user_id,
+                session_id=session_id,
+                duration_seconds=duration_seconds,
+                end_reason=end_reason,
+                final_score=score
+            )
+            logger.debug("Session end analytics tracked", context={"session_id": session_id})
+        except Exception as e:
+            logger.warning("Failed to track session end analytics", error=e)
 
         xp_earned = int(score * 0.1)
         gold_earned = int(score * 0.5)
