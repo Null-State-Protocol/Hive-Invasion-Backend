@@ -1719,8 +1719,11 @@ def _handle_leaderboard_with_period(event, context, period, origin):
             user_response = users_table.get_item(Key={"user_id": entry['user_id']})
             user = user_response.get('Item', {})
             
+            # Use actual username if set, otherwise fall back to email-derived username
+            username = user.get('username') or user.get('email', '').split('@')[0]
+            
             leaderboard.append({
-                'username': user.get('email', '').split('@')[0],
+                'username': username,
                 'score': entry.get('score', 0),
                 'level': entry.get('level', 1),
                 'timestamp': entry.get('updated_at', entry.get('created_at'))
