@@ -180,6 +180,79 @@ aws apigateway put-integration-response \
   --response-parameters '{"method.response.header.Access-Control-Allow-Headers":"'\''Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'\''","method.response.header.Access-Control-Allow-Methods":"'\''GET,OPTIONS'\''","method.response.header.Access-Control-Allow-Origin":"'\''*'\''"}' \
   --region $REGION
 
+# ==================== CREATE /achievements (root level) ====================
+echo "Creating /achievements resource (root level)..."
+ACHIEVEMENTS_ROOT_RESOURCE=$(aws apigateway create-resource \
+  --rest-api-id $API_ID \
+  --parent-id $ROOT_ID \
+  --path-part achievements \
+  --region $REGION)
+
+ACHIEVEMENTS_ROOT_ID=$(echo $ACHIEVEMENTS_ROOT_RESOURCE | jq -r '.id')
+echo "Achievements Root Resource ID: $ACHIEVEMENTS_ROOT_ID"
+
+# ==================== CREATE /achievements/check-wallet ====================
+echo "Creating /achievements/check-wallet resource..."
+CHECK_WALLET_RESOURCE=$(aws apigateway create-resource \
+  --rest-api-id $API_ID \
+  --parent-id $ACHIEVEMENTS_ROOT_ID \
+  --path-part check-wallet \
+  --region $REGION)
+
+CHECK_WALLET_ID=$(echo $CHECK_WALLET_RESOURCE | jq -r '.id')
+echo "Check Wallet Resource ID: $CHECK_WALLET_ID"
+
+# Add GET to /achievements/check-wallet (NO AUTH - public endpoint)
+echo "Adding GET to /achievements/check-wallet..."
+aws apigateway put-method \
+  --rest-api-id $API_ID \
+  --resource-id $CHECK_WALLET_ID \
+  --http-method GET \
+  --authorization-type NONE \
+  --region $REGION
+
+aws apigateway put-integration \
+  --rest-api-id $API_ID \
+  --resource-id $CHECK_WALLET_ID \
+  --http-method GET \
+  --type AWS_PROXY \
+  --integration-http-method POST \
+  --uri "arn:aws:apigateway:$REGION:lambda:path/2015-03-31/functions/$LAMBDA_ARN/invocations" \
+  --region $REGION
+
+# Add OPTIONS to /achievements/check-wallet
+echo "Adding OPTIONS to /achievements/check-wallet..."
+aws apigateway put-method \
+  --rest-api-id $API_ID \
+  --resource-id $CHECK_WALLET_ID \
+  --http-method OPTIONS \
+  --authorization-type NONE \
+  --region $REGION
+
+aws apigateway put-integration \
+  --rest-api-id $API_ID \
+  --resource-id $CHECK_WALLET_ID \
+  --http-method OPTIONS \
+  --type MOCK \
+  --request-templates '{"application/json": "{\"statusCode\": 200}"}' \
+  --region $REGION
+
+aws apigateway put-method-response \
+  --rest-api-id $API_ID \
+  --resource-id $CHECK_WALLET_ID \
+  --http-method OPTIONS \
+  --status-code 200 \
+  --response-parameters '{"method.response.header.Access-Control-Allow-Headers":true,"method.response.header.Access-Control-Allow-Methods":true,"method.response.header.Access-Control-Allow-Origin":true}' \
+  --region $REGION
+
+aws apigateway put-integration-response \
+  --rest-api-id $API_ID \
+  --resource-id $CHECK_WALLET_ID \
+  --http-method OPTIONS \
+  --status-code 200 \
+  --response-parameters '{"method.response.header.Access-Control-Allow-Headers":"'\''Content-Type,X-Amz-Date,Authorization,X-Api-Key,X-Amz-Security-Token'\''","method.response.header.Access-Control-Allow-Methods":"'\''GET,OPTIONS'\''","method.response.header.Access-Control-Allow-Origin":"'\''*'\''"}' \
+  --region $REGION
+
 # ==================== CREATE /leaderboard ====================
 echo "Creating /leaderboard resource..."
 LEADERBOARD_RESOURCE=$(aws apigateway create-resource \
@@ -370,6 +443,15 @@ aws lambda add-permission \
   --source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/GET/player/achievements" \
   --region $REGION
 
+# Permission for /achievements/check-wallet (NO AUTH - public)
+aws lambda add-permission \
+  --function-name hive-invasion-backend \
+  --statement-id apigateway-achievements-check-wallet-get \
+  --action lambda:InvokeFunction \
+  --principal apigateway.amazonaws.com \
+  --source-arn "arn:aws:execute-api:$REGION:$ACCOUNT_ID:$API_ID/*/GET/achievements/check-wallet" \
+  --region $REGION
+
 # Permission for /leaderboard/rank
 aws lambda add-permission \
   --function-name hive-invasion-backend \
@@ -400,5 +482,6 @@ echo ""
 echo "Test endpoints:"
 echo "  GET https://bb5nb3l00b.execute-api.eu-north-1.amazonaws.com/prod/player/profile"
 echo "  GET https://bb5nb3l00b.execute-api.eu-north-1.amazonaws.com/prod/player/achievements"
+echo "  GET https://bb5nb3l00b.execute-api.eu-north-1.amazonaws.com/prod/achievements/check-wallet?wallet_address=0x...&achievement_id=..."
 echo "  GET https://bb5nb3l00b.execute-api.eu-north-1.amazonaws.com/prod/leaderboard/rank"
 echo "  GET https://bb5nb3l00b.execute-api.eu-north-1.amazonaws.com/prod/leaderboard/daily"

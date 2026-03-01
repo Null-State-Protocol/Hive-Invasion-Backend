@@ -90,7 +90,7 @@ def lambda_handler(event, context):
         elif path.startswith('session/'):
             return inject_cors_headers(handle_session(event, context, method, path, origin), origin)
         
-        elif path.startswith('game/') or path.startswith('player/'):
+        elif path.startswith('game/') or path.startswith('player/') or path.startswith('achievements/'):
             return inject_cors_headers(handle_game(event, context, method, path, origin), origin)
         
         elif path.startswith('leaderboard/'):
