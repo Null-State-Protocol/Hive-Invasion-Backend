@@ -1196,10 +1196,16 @@ def reward_key(user_id, key_type, amount=1):
     return {'keys_owned': keys_owned}
 
 
-def update_achievement_progress(user_id, achievement_id, progress):
+def update_achievement_progress(user_id, achievement_id, progress, is_special_task=False):
     """
     Update achievement progress or create if missing.
     Only updates if new progress is higher than existing (prevents downgrades).
+    
+    Args:
+        user_id: User UUID
+        achievement_id: Achievement identifier
+        progress: Progress value (0-100)
+        is_special_task: Boolean indicating if this is a special network task
     """
     import boto3
     from config import config
@@ -1256,10 +1262,11 @@ def update_achievement_progress(user_id, achievement_id, progress):
                 'user_id': user_id,
                 'achievement_id': achievement_id
             },
-            UpdateExpression='SET progress = :progress, updated_at = :now',
+            UpdateExpression='SET progress = :progress, updated_at = :now, is_special_task = :is_special',
             ExpressionAttributeValues={
                 ':progress': progress_value,
-                ':now': now
+                ':now': now,
+                ':is_special': is_special_task
             },
             ReturnValues='ALL_NEW'
         )
@@ -1275,13 +1282,14 @@ def update_achievement_progress(user_id, achievement_id, progress):
         raise
 
 
-def unlock_achievement(user_id, achievement_id):
+def unlock_achievement(user_id, achievement_id, is_special_task=False):
     """
     Unlock an achievement for the player.
     
     Args:
         user_id: User UUID
         achievement_id: Achievement identifier
+        is_special_task: Boolean indicating if this is a special network task
     
     Returns:
         dict: New achievement object
@@ -1311,9 +1319,58 @@ def unlock_achievement(user_id, achievement_id):
         'user_id': user_id,
         'achievement_id': achievement_id,
         'unlocked_at': now,
-        'progress': 100
+        'progress': 100,
+        'is_special_task': is_special_task
     }
     
     achievements_table.put_item(Item=achievement)
     
     return achievement
+
+
+def check_wallet_achievement(wallet_address, achievement_id):
+    """
+    Check if a wallet address has a specific achievement.
+    
+    Args:
+        wallet_address: Ethereum wallet address
+        achievement_id: Achievement identifier
+    
+    Returns:
+        dict: {'has_achievement': bool, 'achievement': dict or None}
+    """
+    import boto3
+    from config import config
+    dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+    
+    # First, find user_id from wallet_address
+    user_wallets_table = dynamodb.Table(config.TABLE_USER_WALLETS)
+    wallet_address = wallet_address.lower()
+    
+    wallet_response = user_wallets_table.get_item(
+        Key={'wallet_address': wallet_address}
+    )
+    
+    if 'Item' not in wallet_response:
+        return {'has_achievement': False, 'achievement': None}
+    
+    user_id = wallet_response['Item'].get('user_id')
+    if not user_id:
+        return {'has_achievement': False, 'achievement': None}
+    
+    # Now check if this user has the achievement
+    achievements_table = dynamodb.Table(config.TABLE_ACHIEVEMENTS)
+    response = achievements_table.query(
+        KeyConditionExpression='user_id = :uid',
+        FilterExpression='achievement_id = :aid',
+        ExpressionAttributeValues={
+            ':uid': user_id,
+            ':aid': achievement_id
+        }
+    )
+    
+    items = response.get('Items', [])
+    if items:
+        return {'has_achievement': True, 'achievement': items[0]}
+    
+    return {'has_achievement': False, 'achievement': None}

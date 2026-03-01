@@ -973,6 +973,10 @@ def handle_game(event, context, method, path, origin):
         elif path == 'player/achievements/unlock' and method == 'POST':
             return handle_unlock_achievement(event, context)
         
+        # GET /achievements/check-wallet - Check if wallet has achievement (no auth required)
+        elif path == 'achievements/check-wallet' and method == 'GET':
+            return handle_check_wallet_achievement(event, context, origin)
+        
         # GET /player/pilots - Get owned pilots
         elif path == 'player/pilots' and method == 'GET':
             return handle_player_pilots(event, context)
@@ -1223,8 +1227,9 @@ def handle_unlock_achievement(event, context, user_id):
         
         body = parse_request_body(event)
         achievement_id = Validator.required(body, 'achievement_id')
+        is_special_task = body.get('is_special_task', False)
         
-        result = unlock_achievement(user_id, achievement_id)
+        result = unlock_achievement(user_id, achievement_id, is_special_task)
         
         if 'error' in result:
             return APIResponse.error(result['error'], status_code=400, origin=origin)
@@ -1235,6 +1240,33 @@ def handle_unlock_achievement(event, context, user_id):
         return APIResponse.validation_error(e.field, e.message, origin)
     except Exception as e:
         logger.error("Unlock achievement error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+def handle_check_wallet_achievement(event, context, origin):
+    """Check if a wallet address has a specific achievement (no auth required)"""
+    try:
+        from models import check_wallet_achievement
+        from validation import Validator
+        
+        # Get query string parameters
+        params = event.get('queryStringParameters') or {}
+        wallet_address = params.get('wallet_address')
+        achievement_id = params.get('achievement_id')
+        
+        if not wallet_address or not achievement_id:
+            return APIResponse.error(
+                'wallet_address and achievement_id are required query parameters',
+                status_code=400,
+                origin=origin
+            )
+        
+        result = check_wallet_achievement(wallet_address, achievement_id)
+        
+        return APIResponse.success(result, origin=origin)
+    
+    except Exception as e:
+        logger.error("Check wallet achievement error", error=e)
         return APIResponse.server_error(origin=origin)
 
 
@@ -1624,14 +1656,16 @@ def handle_update_achievement(event, context, user_id):
         body = parse_request_body(event)
         achievement_id = Validator.required(body, 'achievement_id')
         progress = int(Validator.required(body, 'progress'))
+        is_special_task = body.get('is_special_task', False)
         
         # Log request for debugging
         logger.info("Achievement update request", 
                    user_id=user_id, 
                    achievement_id=achievement_id, 
-                   progress=progress)
+                   progress=progress,
+                   is_special_task=is_special_task)
         
-        result = update_achievement_progress(user_id, achievement_id, progress)
+        result = update_achievement_progress(user_id, achievement_id, progress, is_special_task)
         return APIResponse.success(result, origin=origin)
     except ValidationError as e:
         return APIResponse.validation_error(e.field, e.message, origin)
