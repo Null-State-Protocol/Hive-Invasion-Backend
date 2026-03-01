@@ -163,7 +163,7 @@ class WalletAuthService:
                 logger.debug("Storing new wallet user", context={"user_id": user_id, "wallet_address": wallet_address})
                 self.users_table.put_item(Item=user.to_db_item())
                 
-                # Initialize player data with starter keys
+                # Initialize player data with no starter keys
                 logger.debug("Initializing player data for new wallet user", context={"user_id": user_id})
                 try:
                     player_table = self.dynamodb.Table("hive_player_data")
@@ -175,13 +175,13 @@ class WalletAuthService:
                         "games_won": 0,
                         "highest_wave": 0,
                         "keys_owned": {
-                            "bronze": 3,
-                            "silver": 3,
-                            "gold": 3
+                            "bronze": 0,
+                            "silver": 0,
+                            "gold": 0
                         },
                         "created_at": now
                     })
-                    logger.debug("Player data initialized with starter keys", context={"user_id": user_id})
+                    logger.debug("Player data initialized with no starter keys", context={"user_id": user_id})
                 except Exception as e:
                     logger.error("Failed to initialize player data", error=e, context={"user_id": user_id})
                     # Don't fail authentication if player data init fails - it can be created later
