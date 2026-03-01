@@ -207,12 +207,12 @@ class WalletAuthService:
         wallet_address: str,
         signature: str,
         message: str
-    ) -> Tuple[bool, Optional[str]]:
+    ) -> Tuple[bool, Optional[str], Optional[Dict]]:
         """
         Link a wallet to an existing user account
         
         Returns:
-            (success, error_message)
+            (success, error_message, dust_claim_result)
         """
         try:
             logger.info("Wallet linking started", context={"user_id": user_id, "wallet_address": wallet_address})
@@ -220,14 +220,14 @@ class WalletAuthService:
             
             if not is_valid_wallet_address(wallet_address):
                 logger.warning("Invalid wallet address for linking", context={"wallet_address": wallet_address, "user_id": user_id})
-                return False, "Invalid wallet address"
+                return False, "Invalid wallet address", None
             
             # Verify signature
             logger.debug("Verifying signature for wallet linking", context={"user_id": user_id, "wallet_address": wallet_address})
             is_valid = SignatureValidator.verify_eth_signature(message, signature, wallet_address)
             if not is_valid:
                 logger.warning("Invalid signature for wallet linking", context={"user_id": user_id, "wallet_address": wallet_address})
-                return False, "Invalid signature"
+                return False, "Invalid signature", None
             
             # Check if wallet is already linked
             logger.debug("Checking if wallet already linked", context={"wallet_address": wallet_address})
@@ -245,10 +245,10 @@ class WalletAuthService:
                         UpdateExpression="SET wallet_address = :wallet",
                         ExpressionAttributeValues={":wallet": wallet_address}
                     )
-                    return True, None
+                    return True, None, None
                 else:
                     logger.warning("Wallet already linked to different user", context={"wallet_address": wallet_address, "existing_user_id": existing_user_id, "requested_user_id": user_id})
-                    return False, "Wallet already linked to another account"
+                    return False, "Wallet already linked to another account", None
 
             # Check if user already has a different wallet linked (legacy/old binding)
             user_response = self.users_table.get_item(Key={"user_id": user_id})
@@ -318,11 +318,10 @@ class WalletAuthService:
                 })
             
             return True, None, dust_claim_result
-            return True, None
         
         except Exception as e:
             logger.error("Wallet linking failed", error=e)
-            return False, "Failed to link wallet"
+            return False, "Failed to link wallet", None
     
     def unlink_wallet(self, user_id: str, wallet_address: str) -> Tuple[bool, Optional[str]]:
         """
