@@ -125,15 +125,19 @@ def lambda_handler(event, context):
     
     except Exception as e:
         import traceback
+        import json
         error_details = {
             "error_type": type(e).__name__,
             "error_message": str(e),
             "traceback": traceback.format_exc(),
             "path": event.get('path'),
-            "method": event.get('httpMethod')
+            "rawPath": event.get('rawPath'),
+            "method": event.get('httpMethod'),
+            "normalized_path": path if 'path' in locals() else "N/A"
         }
         logger.error(f"Unhandled error in lambda_handler", error=e, context=error_details)
-        print(f"[DETAILED ERROR] {error_details}")  # Extra stdout logging
+        print(f"[DETAILED ERROR] {json.dumps(error_details, indent=2)}")  # Extra stdout logging
+        print(f"[EVENT] {json.dumps(event, default=str)}")  # Log raw event
         return inject_cors_headers(
             APIResponse.server_error("Internal server error", origin=origin),
             origin
@@ -143,13 +147,39 @@ def lambda_handler(event, context):
 lambda_handler._first_run = True
 
 
+# ==================== HELPER FUNCTIONS ====================
+
+def parse_request_body(event):
+    """
+    Parse request body from event, handling base64 encoding
+    
+    Args:
+        event: Lambda event object
+        
+    Returns:
+        Dict with parsed body content
+    """
+    body_str = event.get('body')
+    
+    # Handle base64 encoded body from API Gateway
+    if event.get('isBase64Encoded', False) and body_str:
+        import base64
+        try:
+            body_str = base64.b64decode(body_str).decode('utf-8')
+        except Exception as e:
+            logger.error("Failed to decode base64 body", error=e)
+            raise ValidationError("body", "Invalid request body encoding")
+    
+    return validate_request_body(body_str)
+
+
 # ==================== AUTH HANDLERS ====================
 
 def handle_auth(event, context, method, path, origin):
     """Handle authentication endpoints"""
     
     try:
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         
         # POST /auth/register - Email registration
         if path == 'auth/register' and method == 'POST':
@@ -334,7 +364,7 @@ def handle_auth(event, context, method, path, origin):
         
         # POST /auth/verify-email - Verify email with 4-digit code
         elif path == 'auth/verify-email' and method == 'POST':
-            body = validate_request_body(event.get('body'))
+            body = parse_request_body(event)
             email = body.get('email', '').strip()
             verification_code = body.get('code', '').strip()
             return_token = body.get('return_token', False)  # For 2-step login flow
@@ -362,7 +392,7 @@ def handle_auth(event, context, method, path, origin):
         
         # POST /auth/resend-code - Resend verification code
         elif path == 'auth/resend-code' and method == 'POST':
-            body = validate_request_body(event.get('body'))
+            body = parse_request_body(event)
             email = body.get('email', '').strip()
             
             if not email:
@@ -380,7 +410,7 @@ def handle_auth(event, context, method, path, origin):
         
         # POST /auth/complete-registration - Complete registration with password
         elif path == 'auth/complete-registration' and method == 'POST':
-            body = validate_request_body(event.get('body'))
+            body = parse_request_body(event)
             email = body.get('email', '').strip()
             password = body.get('password', '').strip()
             
@@ -428,7 +458,7 @@ def handle_link_wallet(event, context, user_id):
     origin = get_origin(event)
     
     try:
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         from validation import Validator
         
         wallet_address = Validator.required(body, 'wallet_address')
@@ -623,7 +653,7 @@ def handle_update_2step_setting(event, context, user_id):
     origin = get_origin(event)
     
     try:
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         enabled = body.get('enabled', True)
         verification_code = body.get('code')  # Optional verification code
         send_code = body.get('send_code', False)  # Request to send code
@@ -743,7 +773,7 @@ def handle_change_password(event, context, user_id):
     origin = get_origin(event)
     
     try:
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         from validation import Validator
         
         current_password = Validator.required(body, 'current_password')
@@ -862,7 +892,7 @@ def handle_confirm_password_change(event, context, user_id):
     origin = get_origin(event)
     
     try:
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         from validation import Validator
         from email_auth import EmailAuthService
         import boto3
@@ -1119,7 +1149,7 @@ def handle_update_player_profile(event, context, user_id):
     try:
         import boto3
         
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         
         # Only allow username updates for now
         username = body.get('username')
@@ -1198,7 +1228,7 @@ def handle_unlock_achievement(event, context, user_id):
         from models import unlock_achievement
         from validation import Validator
         
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         achievement_id = Validator.required(body, 'achievement_id')
         
         result = unlock_achievement(user_id, achievement_id)
@@ -1240,7 +1270,7 @@ def handle_unlock_pilot(event, context, user_id):
         from models import unlock_pilot
         from validation import Validator
         
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         pilot_id = Validator.required(body, 'pilot_id')
         
         result = unlock_pilot(user_id, pilot_id)
@@ -1282,7 +1312,7 @@ def handle_unlock_mech(event, context, user_id):
         from models import unlock_mech
         from validation import Validator
         
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         mech_id = Validator.required(body, 'mech_id')
         variant = body.get('variant', 'standard')
         
@@ -1325,7 +1355,7 @@ def handle_activate_boost(event, context, user_id):
         from models import activate_boost
         from validation import Validator
         
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         boost_id = Validator.required(body, 'boost_id')
         boost_name = body.get('boost_name') or boost_id
         duration_seconds = int(body.get('duration_seconds', 3600))
@@ -1365,7 +1395,7 @@ def handle_unlock_skill(event, context, user_id):
         from models import unlock_skill
         from validation import Validator
         
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         skill_id = Validator.required(body, 'skill_id')
         slot = body.get('slot')
         
@@ -1409,7 +1439,7 @@ def handle_update_gems(event, context, user_id):
         from models import update_gems, set_gems
         from validation import Validator
         
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         if 'amount' in body:
             amount = int(Validator.required(body, 'amount'))
             new_gems = update_gems(user_id, amount)
@@ -1455,7 +1485,7 @@ def handle_update_dust(event, context, user_id):
         from models import update_dust, set_dust
         from validation import Validator
         
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         if 'amount' in body:
             amount = int(Validator.required(body, 'amount'))
             new_dust = update_dust(user_id, amount)
@@ -1483,7 +1513,7 @@ def handle_update_high_score(event, context, user_id):
         from models import update_high_score, update_leaderboard
         from validation import Validator
 
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         high_score = int(Validator.required(body, 'high_score'))
         
         # Validate score
@@ -1523,7 +1553,7 @@ def handle_update_level(event, context, user_id):
         from models import update_level
         from validation import Validator
 
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         level = int(Validator.required(body, 'level'))
         new_level = update_level(user_id, level)
         return APIResponse.success({'level': new_level}, origin=origin)
@@ -1542,7 +1572,7 @@ def handle_update_skill_locations(event, context, user_id):
         from models import update_skill_locations
         from validation import Validator
 
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         skill_locations = Validator.required(body, 'skill_locations')
         updated = update_skill_locations(user_id, skill_locations)
         return APIResponse.success({'skill_locations': updated}, origin=origin)
@@ -1576,7 +1606,7 @@ def handle_save_player_data(event, context, user_id):
     origin = get_origin(event)
     try:
         from models import save_player_data
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         result = save_player_data(
             user_id,
             dust=body.get('dust'),
@@ -1598,7 +1628,7 @@ def handle_update_achievement(event, context, user_id):
         from models import update_achievement_progress
         from validation import Validator
 
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         achievement_id = Validator.required(body, 'achievement_id')
         progress = int(Validator.required(body, 'progress'))
         
@@ -1625,7 +1655,7 @@ def handle_remove_boost(event, context, user_id):
         from models import remove_boost
         from validation import Validator
 
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         boost_id = Validator.required(body, 'boost_id')
         result = remove_boost(user_id, boost_id)
         return APIResponse.success(result, origin=origin)
@@ -1811,7 +1841,7 @@ def handle_track_event(event, context, user_id):
     origin = get_origin(event)
     
     try:
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         
         event_type_str = body.get('event_type')
         event_data_str = body.get('event_data', '{}')
@@ -1930,7 +1960,7 @@ def handle_session_start(event, context, user_id):
     
     try:
         origin = get_origin(event)
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         
         difficulty = body.get('difficulty', 'normal')
         game_mode = body.get('game_mode', 'survival')
@@ -1999,7 +2029,7 @@ def handle_session_end(event, context, user_id, path):
     
     try:
         origin = get_origin(event)
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         
         # Extract session_id from path
         parts = path.split('/')
@@ -2128,7 +2158,7 @@ def handle_session_end_by_body(event, context, user_id):
 
     try:
         origin = get_origin(event)
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
 
         session_id = body.get('session_id')
         if not session_id:
@@ -2288,7 +2318,7 @@ def handle_key_purchase(event, context, user_id):
     try:
         origin = get_origin(event)
         request_id = getattr(context, "aws_request_id", None) or get_request_id(event)
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
 
         def log_fail(reason, tx_hash_value=None):
             tx_prefix = (tx_hash_value or "")[:12]
@@ -2492,7 +2522,7 @@ def handle_key_replay(event, context):
 
     origin = get_origin(event)
     request_id = getattr(context, "aws_request_id", None) or get_request_id(event)
-    body = validate_request_body(event.get('body'))
+    body = parse_request_body(event)
 
     def build_message_response(message, status_code=400):
         headers = SecurityHeaders.get_headers(origin)
@@ -2704,7 +2734,7 @@ def handle_spend_key(event, context, user_id):
 
     try:
         origin = get_origin(event)
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         key_type = Validator.required(body, 'key_type').lower()
 
         if key_type not in ('bronze', 'silver', 'gold'):
@@ -2731,7 +2761,7 @@ def handle_reward_key(event, context, user_id):
 
     try:
         origin = get_origin(event)
-        body = validate_request_body(event.get('body'))
+        body = parse_request_body(event)
         key_type = Validator.required(body, 'key_type').lower()
         amount = body.get('amount', 1)
 
