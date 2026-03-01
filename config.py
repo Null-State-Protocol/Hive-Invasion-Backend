@@ -57,6 +57,7 @@ class Config:
     
     # Dust Rewards (Legacy test rewards)
     TABLE_DUST_REWARDS = os.getenv("TABLE_DUST_REWARDS", "hive_dust_rewards")
+    TABLE_PLAYER_RESOURCES = os.getenv("TABLE_PLAYER_RESOURCES", "hive_player_resources")
     
     PASSWORD_RESET_EXPIRE_MINUTES = 30
     EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@hiveinvasion.com")

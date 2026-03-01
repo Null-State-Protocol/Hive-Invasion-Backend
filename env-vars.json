@@ -1,0 +1,27 @@
+{
+  "Variables": {
+    "AWS_REGION": "eu-north-1",
+    "TABLE_USERS": "hive_users",
+    "TABLE_USER_EMAILS": "hive_user_emails",
+    "TABLE_USER_WALLETS": "hive_user_wallets",
+    "TABLE_SESSIONS": "hive_sessions",
+    "TABLE_PLAYER_DATA": "hive_player_data",
+    "TABLE_ACHIEVEMENTS": "hive_achievements",
+    "TABLE_LEADERBOARD_DAILY": "hive_leaderboard_daily",
+    "TABLE_LEADERBOARD_WEEKLY": "hive_leaderboard_weekly",
+    "TABLE_LEADERBOARD_ALLTIME": "hive_leaderboard_alltime",
+    "TABLE_LOGS": "hive_logs",
+    "TABLE_ANALYTICS": "hive_analytics",
+    "TABLE_EMAIL_VERIFICATION": "hive_email_verification",
+    "TABLE_PASSWORD_RESET": "hive_password_reset",
+    "TABLE_DUST_REWARDS": "hive_dust_rewards",
+    "JWT_SECRET": "7DaWobDIlVj2CODvEEnDUrBF_3T22XRLMFgECfo7Dm0",
+    "JWT_ACCESS_TOKEN_EXPIRE_MINUTES": "60",
+    "JWT_REFRESH_TOKEN_EXPIRE_DAYS": "30",
+    "ENVIRONMENT": "production",
+    "LOG_LEVEL": "INFO",
+    "KEY_PURCHASE_ENABLED": "true",
+    "SOMNIA_RPC_MAINNET": "https://api.infra.mainnet.somnia.network/",
+    "SOMNIA_TREASURY_WALLET": "0xEbD49456f4b448E9455bDD89B42e7EFD24567D60"
+  }
+}
