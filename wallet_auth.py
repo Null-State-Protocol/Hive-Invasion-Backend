@@ -163,6 +163,29 @@ class WalletAuthService:
                 logger.debug("Storing new wallet user", context={"user_id": user_id, "wallet_address": wallet_address})
                 self.users_table.put_item(Item=user.to_db_item())
                 
+                # Initialize player data with starter keys
+                logger.debug("Initializing player data for new wallet user", context={"user_id": user_id})
+                try:
+                    player_table = self.dynamodb.Table("hive_player_data")
+                    player_table.put_item(Item={
+                        "user_id": user_id,
+                        "level": 1,
+                        "total_score": 0,
+                        "games_played": 0,
+                        "games_won": 0,
+                        "highest_wave": 0,
+                        "keys_owned": {
+                            "bronze": 3,
+                            "silver": 3,
+                            "gold": 3
+                        },
+                        "created_at": now
+                    })
+                    logger.debug("Player data initialized with starter keys", context={"user_id": user_id})
+                except Exception as e:
+                    logger.error("Failed to initialize player data", error=e, context={"user_id": user_id})
+                    # Don't fail authentication if player data init fails - it can be created later
+                
                 # Link wallet
                 logger.debug("Linking wallet to new user", context={"user_id": user_id, "wallet_address": wallet_address})
                 self.user_wallets_table.put_item(Item={

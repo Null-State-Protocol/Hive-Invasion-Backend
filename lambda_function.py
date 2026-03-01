@@ -1086,29 +1086,21 @@ def handle_player_profile(event, context, user_id):
         
         user = user_response['Item']
         
-        # Get player data (or create default)
+        # Get player data
         player_table = dynamodb.Table(config.TABLE_PLAYER_DATA)
         player_response = player_table.get_item(Key={"user_id": user_id})
         
-        if 'Item' in player_response:
-            player_data = player_response['Item']
-        else:
-            # Create default player data with 3 starter keys
-            player_data = {
-                'user_id': user_id,
-                'level': 1,
-                'total_score': 0,
-                'games_played': 0,
-                'games_won': 0,
-                'highest_wave': 0,
-                'keys_owned': {
-                    'bronze': 3,
-                    'silver': 3,
-                    'gold': 3
-                },
-                'created_at': datetime.now(timezone.utc).isoformat()
-            }
-            player_table.put_item(Item=player_data)
+        if 'Item' not in player_response:
+            # Player data must be initialized at registration time, not on profile fetch
+            # This prevents keys from being reset during wallet reconnection
+            logger.warning("Player data missing for user", context={"user_id": user_id})
+            return APIResponse.error(
+                "Player data not initialized. Please ensure you completed registration.",
+                status_code=500,
+                origin=origin
+            )
+        
+        player_data = player_response['Item']
         
         # Combine user and player data
         profile = {
@@ -1123,6 +1115,7 @@ def handle_player_profile(event, context, user_id):
             'highest_wave': player_data.get('highest_wave', 0),
             'dust_count': player_data.get('dust_count', 0),
             'gems': player_data.get('gems', 0),
+            'keys_owned': player_data.get('keys_owned', {'bronze': 0, 'silver': 0, 'gold': 0}),
             'pilots': player_data.get('pilots', []),
             'mechs': player_data.get('mechs', []),
             'boosts': player_data.get('boosts', []),
