@@ -278,6 +278,10 @@ def handle_auth(event, context, method, path, origin):
         elif path == 'auth/link-wallet' and method == 'POST':
             return handle_link_wallet(event, context)
         
+        # GET /auth/check-dust-reward - Check dust reward for wallet (no auth required)
+        elif path == 'auth/check-dust-reward' and method == 'GET':
+            return handle_check_dust_reward(event, context, origin)
+        
         # DELETE /auth/unlink-wallet - Unlink wallet from current user (requires auth)
         elif path == 'auth/unlink-wallet' and method == 'DELETE':
             return handle_unlink_wallet(event, context)
@@ -432,13 +436,19 @@ def handle_link_wallet(event, context, user_id):
         message = Validator.required(body, 'message')
         
         wallet_service = WalletAuthService()
-        success, error = wallet_service.link_wallet_to_user(user_id, wallet_address, signature, message)
+        success, error, dust_claim_result = wallet_service.link_wallet_to_user(user_id, wallet_address, signature, message)
         
         if success:
-            return APIResponse.success(
-                {"message": "Wallet linked successfully", "wallet_address": wallet_address},
-                origin=origin
-            )
+            response_data = {
+                "message": "Wallet linked successfully",
+                "wallet_address": wallet_address
+            }
+            
+            # Include dust claim info if reward was claimed
+            if dust_claim_result:
+                response_data["dust_reward"] = dust_claim_result
+            
+            return APIResponse.success(response_data, origin=origin)
         else:
             return APIResponse.error(error, origin=origin)
     
@@ -500,6 +510,51 @@ def handle_unlink_wallet(event, context, user_id):
     
     except Exception as e:
         logger.error("Unlink wallet error", error=e, user_id=user_id)
+        return APIResponse.server_error(origin=origin)
+
+
+def handle_check_dust_reward(event, context, origin):
+    """Check if a wallet has unclaimed dust rewards (no auth required)"""
+    try:
+        # Get wallet address from query parameters
+        params = event.get('queryStringParameters') or {}
+        wallet_address = params.get('wallet')
+        
+        if not wallet_address:
+            return APIResponse.error("wallet parameter is required", origin=origin)
+        
+        from dust_rewards import DustRewardsService
+        dust_service = DustRewardsService()
+        
+        has_reward, reward_data, error = dust_service.check_reward(wallet_address)
+        
+        if error:
+            return APIResponse.error(error, origin=origin)
+        
+        if has_reward:
+            return APIResponse.success({
+                "has_reward": True,
+                "dust_amount": reward_data["dust_amount"],
+                "wallet_address": wallet_address,
+                "claimed": False
+            }, origin=origin)
+        elif reward_data and reward_data.get("claimed"):
+            return APIResponse.success({
+                "has_reward": False,
+                "claimed": True,
+                "dust_amount": reward_data["dust_amount"],
+                "claimed_at": reward_data.get("claimed_at"),
+                "wallet_address": wallet_address
+            }, origin=origin)
+        else:
+            return APIResponse.success({
+                "has_reward": False,
+                "claimed": False,
+                "wallet_address": wallet_address
+            }, origin=origin)
+    
+    except Exception as e:
+        logger.error("Check dust reward error", error=e)
         return APIResponse.server_error(origin=origin)
 
 

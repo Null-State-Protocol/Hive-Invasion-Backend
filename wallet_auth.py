@@ -16,6 +16,7 @@ from models import User, UserWallet, now_iso
 from security import SignatureValidator, is_valid_wallet_address
 from jwt_handler import JWTHandler
 from logger import logger
+from dust_rewards import DustRewardsService
 
 
 class WalletAuthService:
@@ -25,6 +26,7 @@ class WalletAuthService:
         self.dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
         self.users_table = self.dynamodb.Table(config.TABLE_USERS)
         self.user_wallets_table = self.dynamodb.Table(config.TABLE_USER_WALLETS)
+        self.dust_rewards_service = DustRewardsService()
     
     def get_message_to_sign(self, wallet_address: str) -> Tuple[bool, Optional[Dict], Optional[str]]:
         """
@@ -281,7 +283,41 @@ class WalletAuthService:
                 "Wallet linked to user",
                 context={"user_id": user_id, "wallet_address": wallet_address}
             )
+            # Check and claim dust rewards if available
+            dust_claim_result = None
+            try:
+                has_reward, reward_data, reward_error = self.dust_rewards_service.check_reward(wallet_address)
+                if has_reward:
+                    logger.info("Dust reward available for wallet", context={
+                        "wallet_address": wallet_address,
+                        "dust_amount": reward_data.get("dust_amount")
+                    })
+                    
+                    # Claim the reward
+                    claim_success, claim_data, claim_error = self.dust_rewards_service.claim_reward(wallet_address, user_id)
+                    if claim_success:
+                        dust_claim_result = {
+                            "dust_claimed": True,
+                            "dust_amount": claim_data["dust_amount"]
+                        }
+                        logger.info("Dust reward claimed during wallet linking", context={
+                            "user_id": user_id,
+                            "wallet_address": wallet_address,
+                            "dust_amount": claim_data["dust_amount"]
+                        })
+                    else:
+                        logger.warning("Failed to claim dust reward", context={
+                            "wallet_address": wallet_address,
+                            "error": claim_error
+                        })
+            except Exception as dust_error:
+                # Don't fail wallet linking if dust claim fails
+                logger.error("Error checking/claiming dust reward", error=dust_error, context={
+                    "wallet_address": wallet_address,
+                    "user_id": user_id
+                })
             
+            return True, None, dust_claim_result
             return True, None
         
         except Exception as e:

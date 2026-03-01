@@ -54,6 +54,10 @@ class Config:
     
     # Account Deletion (GDPR compliance)
     TABLE_DELETED_ACCOUNTS = os.getenv("TABLE_DELETED_ACCOUNTS", "hive_deleted_accounts")
+    
+    # Dust Rewards (Legacy test rewards)
+    TABLE_DUST_REWARDS = os.getenv("TABLE_DUST_REWARDS", "hive_dust_rewards")
+    
     PASSWORD_RESET_EXPIRE_MINUTES = 30
     EMAIL_FROM = os.getenv("EMAIL_FROM", "noreply@hiveinvasion.com")
     EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "ses")  # ses or sendgrid
