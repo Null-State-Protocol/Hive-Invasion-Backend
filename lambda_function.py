@@ -2290,6 +2290,7 @@ def handle_keys(event, context, method, path, origin):
     Handle key purchase/ownership endpoints.
     
     Routes:
+    - POST /keys/prepare-order
     - POST /keys/purchase
     - POST /keys/replay
     - POST /keys/spend
@@ -2298,8 +2299,12 @@ def handle_keys(event, context, method, path, origin):
     - GET /keys/history
     """
     try:
+        # POST /keys/prepare-order - Generate orderId for contract buy()
+        if path == 'keys/prepare-order' and method == 'POST':
+            return handle_prepare_order(event, context)
+
         # POST /keys/purchase - Purchase a key (Somnia)
-        if path == 'keys/purchase' and method == 'POST':
+        elif path == 'keys/purchase' and method == 'POST':
             return handle_key_purchase(event, context)
 
         # POST /keys/replay - Replay purchase by tx_hash (admin)
@@ -2332,6 +2337,55 @@ def handle_keys(event, context, method, path, origin):
     
     except Exception as e:
         logger.error("Keys handler error", error=e)
+        return APIResponse.server_error(origin=origin)
+
+
+@require_auth()
+def handle_prepare_order(event, context, user_id):
+    """POST /keys/prepare-order - Generate orderId = keccak256(packed(wallet, productId, nonce))"""
+    from contract_adapter import ContractAdapter
+    from validation import Validator
+    from security import SecurityHeaders
+    import json, time
+
+    origin = get_origin(event)
+    body = parse_request_body(event)
+
+    try:
+        key_type = Validator.required(body, 'key_type').lower()
+        if key_type not in {'bronze', 'silver', 'gold'}:
+            headers = SecurityHeaders.get_headers(origin)
+            headers['Content-Type'] = 'application/json'
+            return {'statusCode': 400, 'headers': headers, 'body': json.dumps({'message': 'Invalid key_type'})}
+
+        wallet_address = (body.get('wallet_address') or '').strip().lower()
+        if not wallet_address or not wallet_address.startswith('0x') or len(wallet_address) != 42:
+            headers = SecurityHeaders.get_headers(origin)
+            headers['Content-Type'] = 'application/json'
+            return {'statusCode': 400, 'headers': headers, 'body': json.dumps({'message': 'Invalid wallet_address'})}
+
+        product_id = ContractAdapter.get_product_id(key_type)
+        nonce = int(time.time())
+
+        # orderId = keccak256(abi.encodePacked(wallet_20bytes, productId_32bytes, nonce_32bytes))
+        from Crypto.Hash import keccak as _keccak
+        buyer_bytes = bytes.fromhex(wallet_address[2:].zfill(40))
+        product_id_bytes = product_id.to_bytes(32, 'big')
+        nonce_bytes = nonce.to_bytes(32, 'big')
+        packed = buyer_bytes + product_id_bytes + nonce_bytes
+        k = _keccak.new(digest_bits=256)
+        k.update(packed)
+        order_id = '0x' + k.hexdigest()
+
+        return APIResponse.success({
+            'order_id': order_id,
+            'nonce': nonce,
+            'product_id': product_id,
+            'key_type': key_type
+        }, origin=origin)
+
+    except Exception as e:
+        print(f'[PrepareOrder] Error: {e}')
         return APIResponse.server_error(origin=origin)
 
 
