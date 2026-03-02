@@ -452,6 +452,10 @@ class EmailAuthService:
                         "games_played": 0,
                         "games_won": 0,
                         "highest_wave": 0,
+                        "dust_count": 0,
+                        "gems": 0,
+                        "chest_opened": 0,
+                        "high_score": 0,
                         "keys_owned": {
                             "bronze": 0,
                             "silver": 0,

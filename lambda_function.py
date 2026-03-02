@@ -1119,6 +1119,7 @@ def handle_player_profile(event, context, user_id):
             'highest_wave': player_data.get('highest_wave', 0),
             'dust_count': player_data.get('dust_count', 0),
             'gems': player_data.get('gems', 0),
+            'chestOpened': player_data.get('chest_opened', 0),
             'keys_owned': player_data.get('keys_owned', {'bronze': 0, 'silver': 0, 'gold': 0}),
             'pilots': player_data.get('pilots', []),
             'mechs': player_data.get('mechs', []),
@@ -1636,7 +1637,8 @@ def handle_save_player_data(event, context, user_id):
             user_id,
             dust=body.get('dust'),
             high_score=body.get('high_score'),
-            gems=body.get('gems')
+            gems=body.get('gems'),
+            chest_opened=body.get('chestOpened')
         )
         return APIResponse.success(result, origin=origin)
     except Exception as e:

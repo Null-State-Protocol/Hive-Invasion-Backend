@@ -1090,7 +1090,7 @@ def update_skill_locations(user_id, skill_locations):
     return locations
 
 
-def save_player_data(user_id, dust=None, high_score=None, gems=None):
+def save_player_data(user_id, dust=None, high_score=None, gems=None, chest_opened=None):
     """
     Save multiple player fields in one call.
     """
@@ -1107,8 +1107,11 @@ def save_player_data(user_id, dust=None, high_score=None, gems=None):
     if gems is not None:
         updates.append('gems = :gems')
         values[':gems'] = max(0, int(gems))
+    if chest_opened is not None:
+        updates.append('chest_opened = :chest')
+        values[':chest'] = max(0, int(chest_opened))
     if not updates:
-        return {'dust': None, 'high_score': None, 'gems': None}
+        return {'dust': None, 'high_score': None, 'gems': None, 'chest_opened': None}
     update_expr = 'SET ' + ', '.join(updates) + ', updated_at = :now'
     table.update_item(
         Key={'user_id': user_id},
@@ -1118,7 +1121,8 @@ def save_player_data(user_id, dust=None, high_score=None, gems=None):
     return {
         'dust': values.get(':dust'),
         'high_score': values.get(':score'),
-        'gems': values.get(':gems')
+        'gems': values.get(':gems'),
+        'chest_opened': values.get(':chest')
     }
 
 
