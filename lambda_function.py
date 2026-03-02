@@ -2458,9 +2458,10 @@ def handle_key_purchase(event, context, user_id):
         # Log config once
         ContractAdapter.log_config_once()
 
-        # Verify transaction on Somnia mainnet
+        # Verify transaction (supports both contract-based and legacy SOMI transfer systems)
         try:
-            verification = ContractAdapter.verify_transaction_on_somnia(tx_hash, key_type, wallet_address)
+            # Use unified verification method (auto-selects between contract and legacy based on config)
+            verification = ContractAdapter.verify_purchase(tx_hash, key_type, wallet_address)
         except (ValueError, KeyError, AssertionError) as e:
             reason = str(e)
             log_fail(reason, tx_hash)
@@ -2487,7 +2488,10 @@ def handle_key_purchase(event, context, user_id):
             log_fail(reason, tx_hash)
             return build_message_response(reason, status_code=400)
         
+        # Support both contract and legacy systems
         tx_data = verification.get("tx_data", {})
+        purchase_data = verification.get("purchase_data", {})
+        payment_system = verification.get("system", "unknown")
         
         # Transaction verified! Create purchase event
         timestamp = datetime.now(timezone.utc).isoformat()
@@ -2498,7 +2502,9 @@ def handle_key_purchase(event, context, user_id):
             "tx_hash": tx_hash,
             "key_type": key_type,
             "somi_value": somi_value,
-            "timestamp": timestamp
+            "timestamp": timestamp,
+            "payment_system": payment_system,  # Track which system processed this
+            "system_data": tx_data if payment_system == "legacy" else purchase_data
         }
         
         # Update player's key ownership with idempotency guard
@@ -2518,13 +2524,25 @@ def handle_key_purchase(event, context, user_id):
         
         log_success(tx_hash, key_type)
         
+        # Determine appropriate status code based on payment system
+        status_code = 201  # Contract-based purchases return 201 (Created)
+        if payment_system == "legacy":
+            status_code = 200  # Legacy SOMI transfers return 200 (OK)
+        
+        system_message_map = {
+            "contract": "Key purchased successfully via KeyPayments v2 contract",
+            "legacy": "Key purchased successfully with verified SOMI transfer"
+        }
+        message = system_message_map.get(payment_system, "Key purchased successfully")
+        
         return APIResponse.success({
             "ok": True,
             "key_type": key_type,
             "new_balances": new_balances,
             "tx_hash": tx_hash,
-            "message": "Key purchased successfully with verified SOMI payment on Somnia mainnet"
-        }, status_code=200, origin=origin)
+            "payment_system": payment_system,
+            "message": message
+        }, status_code=status_code, origin=origin)
         
     except ValidationError as e:
         reason = e.message
