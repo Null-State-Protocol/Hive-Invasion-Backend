@@ -1220,6 +1220,10 @@ def handle_player_achievements(event, context, user_id):
         return APIResponse.server_error(origin=origin)
 
 
+SPECIAL_TASK_ACHIEVEMENTS = {
+    'HIKill50Enemies', 'HIOpen1Chest', 'HISurvive3', 'HIOpen3Chest', 'ReachLevel5'
+}
+
 @require_auth()
 def handle_unlock_achievement(event, context, user_id):
     """Unlock an achievement"""
@@ -1231,7 +1235,7 @@ def handle_unlock_achievement(event, context, user_id):
         
         body = parse_request_body(event)
         achievement_id = Validator.required(body, 'achievement_id')
-        is_special_task = body.get('is_special_task', False)
+        is_special_task = achievement_id in SPECIAL_TASK_ACHIEVEMENTS
         
         result = unlock_achievement(user_id, achievement_id, is_special_task)
         
@@ -1251,24 +1255,21 @@ def handle_check_wallet_achievement(event, context, origin):
     """Check if a wallet address has a specific achievement (no auth required)"""
     try:
         from models import check_wallet_achievement
-        from validation import Validator
-        
-        # Get query string parameters
+
         params = event.get('queryStringParameters') or {}
         wallet_address = params.get('wallet_address')
         achievement_id = params.get('achievement_id')
-        
+
         if not wallet_address or not achievement_id:
             return APIResponse.error(
                 'wallet_address and achievement_id are required query parameters',
                 status_code=400,
                 origin=origin
             )
-        
+
         result = check_wallet_achievement(wallet_address, achievement_id)
-        
         return APIResponse.success(result, origin=origin)
-    
+
     except Exception as e:
         logger.error("Check wallet achievement error", error=e)
         return APIResponse.server_error(origin=origin)
@@ -1676,7 +1677,7 @@ def handle_update_achievement(event, context, user_id):
         body = parse_request_body(event)
         achievement_id = Validator.required(body, 'achievement_id')
         progress = int(Validator.required(body, 'progress'))
-        is_special_task = body.get('is_special_task', False)
+        is_special_task = achievement_id in SPECIAL_TASK_ACHIEVEMENTS
         
         # Log request for debugging
         logger.info("Achievement update request", 
@@ -2929,9 +2930,31 @@ def handle_events(event, context, method, path, origin):
             # Sort by eventTime ascending
             items.sort(key=lambda x: x.get('eventTime', ''))
 
+            # Build userId → walletId mapping (avoid exposing internal user IDs)
+            unique_user_ids = list({item['userId'] for item in items if 'userId' in item})
+            users_table = dynamodb.Table(config.TABLE_USERS)
+            user_wallet_map = {}
+            for uid in unique_user_ids:
+                try:
+                    u_resp = users_table.get_item(Key={'user_id': uid})
+                    u_item = u_resp.get('Item') or {}
+                    wallet = u_item.get('wallet_address')
+                    if wallet:
+                        user_wallet_map[uid] = wallet
+                except Exception:
+                    pass
+
+            # Replace userId with walletId in each event
+            enriched = []
+            for item in items:
+                uid = item.get('userId')
+                new_item = {k: v for k, v in item.items() if k != 'userId'}
+                new_item['walletId'] = user_wallet_map.get(uid) if uid else None
+                enriched.append(new_item)
+
             return APIResponse.success({
-                'count': len(items),
-                'events': items
+                'count': len(enriched),
+                'events': enriched
             }, origin=origin)
 
         except Exception as e:

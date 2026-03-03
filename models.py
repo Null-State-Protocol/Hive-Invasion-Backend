@@ -1335,46 +1335,28 @@ def unlock_achievement(user_id, achievement_id, is_special_task=False):
 def check_wallet_achievement(wallet_address, achievement_id):
     """
     Check if a wallet address has a specific achievement.
-    
-    Args:
-        wallet_address: Ethereum wallet address
-        achievement_id: Achievement identifier
-    
+
     Returns:
-        dict: {'has_achievement': bool, 'achievement': dict or None}
+        dict: {'has_achievement': bool, 'wallet_address': str, 'achievement_id': str}
     """
     import boto3
     from config import config
     dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
-    
-    # First, find user_id from wallet_address
-    user_wallets_table = dynamodb.Table(config.TABLE_USER_WALLETS)
+
     wallet_address = wallet_address.lower()
-    
-    wallet_response = user_wallets_table.get_item(
+    base = {'wallet_address': wallet_address, 'achievement_id': achievement_id}
+
+    # Find user_id from wallet_address
+    wallet_response = dynamodb.Table(config.TABLE_USER_WALLETS).get_item(
         Key={'wallet_address': wallet_address}
     )
-    
-    if 'Item' not in wallet_response:
-        return {'has_achievement': False, 'achievement': None}
-    
-    user_id = wallet_response['Item'].get('user_id')
+    user_id = (wallet_response.get('Item') or {}).get('user_id')
     if not user_id:
-        return {'has_achievement': False, 'achievement': None}
-    
-    # Now check if this user has the achievement
-    achievements_table = dynamodb.Table(config.TABLE_ACHIEVEMENTS)
-    response = achievements_table.query(
-        KeyConditionExpression='user_id = :uid',
-        FilterExpression='achievement_id = :aid',
-        ExpressionAttributeValues={
-            ':uid': user_id,
-            ':aid': achievement_id
-        }
+        return {**base, 'has_achievement': False}
+
+    # Check if achievement record exists
+    response = dynamodb.Table(config.TABLE_ACHIEVEMENTS).get_item(
+        Key={'user_id': user_id, 'achievement_id': achievement_id}
     )
-    
-    items = response.get('Items', [])
-    if items:
-        return {'has_achievement': True, 'achievement': items[0]}
-    
-    return {'has_achievement': False, 'achievement': None}
+    has = 'Item' in response
+    return {**base, 'has_achievement': has}
