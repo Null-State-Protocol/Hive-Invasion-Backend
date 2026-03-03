@@ -170,33 +170,49 @@ class AnalyticsService:
                 "KeyConditionExpression": "user_id = :user_id",
                 "ExpressionAttributeValues": {":user_id": user_id},
                 "ScanIndexForward": False,
-                "Limit": limit
             }
-            
-            # Add time range filter
+
+            # Add time range filter.
+            # timestamp SK is stored as Unix milliseconds (int) — compare with int, not ISO string.
             if start_time or end_time:
                 conditions = []
                 if start_time:
                     conditions.append("#ts >= :start")
-                    query_params["ExpressionAttributeValues"][":start"] = start_time.isoformat()
+                    query_params["ExpressionAttributeValues"][":start"] = int(start_time.timestamp() * 1000)
                 if end_time:
                     conditions.append("#ts <= :end")
-                    query_params["ExpressionAttributeValues"][":end"] = end_time.isoformat()
-                
+                    query_params["ExpressionAttributeValues"][":end"] = int(end_time.timestamp() * 1000)
+
                 if conditions:
                     query_params["ExpressionAttributeNames"] = {"#ts": "timestamp"}
                     query_params["KeyConditionExpression"] += " AND " + " AND ".join(conditions)
-            
-            # Add event type filter
+
+            # Add event type filter.
+            # FilterExpression is evaluated AFTER DynamoDB scans each page, so we must NOT set
+            # a hard Limit at the DynamoDB level — otherwise we'd silently return fewer results
+            # than requested. Instead we paginate until we collect `limit` matching items.
             if event_type:
                 query_params["FilterExpression"] = "event_type = :event_type"
                 query_params["ExpressionAttributeValues"][":event_type"] = event_type.value
-            
-            response = self.table.query(**query_params)
-            events = response.get("Items", [])
+
+                all_events: List[Dict] = []
+                while True:
+                    response = self.table.query(**query_params)
+                    all_events.extend(response.get("Items", []))
+                    if len(all_events) >= limit or "LastEvaluatedKey" not in response:
+                        break
+                    query_params["ExclusiveStartKey"] = response["LastEvaluatedKey"]
+
+                events = all_events[:limit]
+            else:
+                # No filter expression — Limit is safe here
+                query_params["Limit"] = limit
+                response = self.table.query(**query_params)
+                events = response.get("Items", [])
+
             logger.debug("User events retrieved", context={"user_id": user_id, "count": len(events)})
             return events
-        
+
         except ClientError as e:
             logger.error(f"Failed to query user events", context={"user_id": user_id}, error=e)
             return []
