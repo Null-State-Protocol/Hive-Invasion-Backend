@@ -65,19 +65,25 @@ class AnalyticsService:
         event_data: Dict[str, Any],
         session_id: Optional[str] = None,
         platform: Optional[str] = None,
-        app_version: Optional[str] = None
+        app_version: Optional[str] = None,
+        raw_event_type: Optional[str] = None,
+        wallet_id: Optional[str] = None,
+        client_timestamp: Optional[str] = None
     ) -> bool:
         """
         Track a game event
-        
+
         Args:
-            user_id: User identifier (user_id or wallet_address)
-            event_type: Type of event
-            event_data: Event-specific data
+            user_id: User identifier (JWT user_id)
+            event_type: Normalised EventType enum value
+            event_data: Event-specific data dict
             session_id: Session identifier
             platform: Platform (web/ios/android)
-            app_version: Game version
-        
+            app_version: Game version string
+            raw_event_type: Original event type string from client (e.g. "GameStart")
+            wallet_id: Wallet address sent by client (may differ from user_id)
+            client_timestamp: ISO timestamp generated on the client side
+
         Returns:
             Success status
         """
@@ -107,13 +113,23 @@ class AnalyticsService:
             
             if session_id:
                 item["session_id"] = session_id
-            
+
             if platform:
                 item["platform"] = platform
-            
+
             if app_version:
                 item["app_version"] = app_version
-            
+
+            # Preserve original client-side event type string for backoffice queries
+            if raw_event_type and raw_event_type != event_type.value:
+                item["raw_event_type"] = raw_event_type
+
+            if wallet_id:
+                item["wallet_id"] = wallet_id
+
+            if client_timestamp:
+                item["client_timestamp"] = client_timestamp
+
             self.table.put_item(Item=item)
             
             logger.debug(

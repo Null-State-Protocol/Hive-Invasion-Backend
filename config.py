@@ -26,6 +26,10 @@ class Config:
     TABLE_ANALYTICS = os.getenv("TABLE_ANALYTICS", "hive_analytics")
     TABLE_EMAIL_VERIFICATION = os.getenv("TABLE_EMAIL_VERIFICATION", "hive_email_verification")
     TABLE_PASSWORD_RESET = os.getenv("TABLE_PASSWORD_RESET", "hive_password_reset")
+    TABLE_LEVEL_EVENTS = os.getenv("TABLE_LEVEL_EVENTS", "hive_level_events")
+
+    # External API key for level events endpoint (give to partner teams)
+    LEVEL_EVENTS_API_KEY = os.getenv("LEVEL_EVENTS_API_KEY", "")
     
     # JWT Configuration
     JWT_SECRET = os.getenv("JWT_SECRET", "CHANGE_ME_IN_PRODUCTION")  # Must be set in Lambda env

@@ -104,6 +104,9 @@ def lambda_handler(event, context):
         
         elif path in ('', 'health', 'ping'):
             return inject_cors_headers(handle_health(event, context, origin), origin)
+
+        elif path.startswith('events/'):
+            return inject_cors_headers(handle_events(event, context, method, path, origin), origin)
         
         else:
             return inject_cors_headers(
@@ -1578,10 +1581,25 @@ def handle_update_level(event, context, user_id):
     try:
         from models import update_level
         from validation import Validator
+        import boto3, uuid
 
         body = parse_request_body(event)
         level = int(Validator.required(body, 'level'))
         new_level = update_level(user_id, level)
+
+        # Write level-up event to hive_level_events table
+        try:
+            dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+            events_table = dynamodb.Table(config.TABLE_LEVEL_EVENTS)
+            events_table.put_item(Item={
+                'eventId': str(uuid.uuid4()),
+                'userId': user_id,
+                'levelNumber': new_level,
+                'eventTime': now_iso()
+            })
+        except Exception as ev_err:
+            logger.error("Failed to write level event", error=ev_err, user_id=user_id)
+
         return APIResponse.success({'level': new_level}, origin=origin)
     except ValidationError as e:
         return APIResponse.validation_error(e.field, e.message, origin)
@@ -1880,6 +1898,8 @@ def handle_track_event(event, context, user_id):
         session_id = body.get('session_id')
         platform = body.get('platform', 'unknown')
         app_version = body.get('app_version', '1.0.0')
+        wallet_id = body.get('wallet_id')          # wallet address from client
+        client_timestamp = body.get('client_timestamp')  # client-side ISO timestamp
         
         if not event_type_str:
             return APIResponse.error(
@@ -1918,7 +1938,10 @@ def handle_track_event(event, context, user_id):
             event_data=event_data,
             session_id=session_id,
             platform=platform,
-            app_version=app_version
+            app_version=app_version,
+            raw_event_type=event_type_str,       # preserve original client type name
+            wallet_id=wallet_id,
+            client_timestamp=client_timestamp
         )
         
         if success:
@@ -2855,6 +2878,67 @@ def handle_spend_key(event, context, user_id):
     except Exception as e:
         logger.error("Spend key error", error=e, user_id=user_id)
         return APIResponse.server_error(origin=get_origin(event))
+
+
+# ==================== EVENTS HANDLERS ====================
+
+def handle_events(event, context, method, path, origin):
+    """Handle external event endpoints — no user auth, API key protected."""
+
+    # GET /events/level-ups — returns full hive_level_events table
+    if path == 'events/level-ups' and method == 'GET':
+        try:
+            # Validate API key (query param or header)
+            params = event.get('queryStringParameters') or {}
+            headers = event.get('headers') or {}
+            provided_key = (
+                params.get('api_key')
+                or headers.get('x-api-key')
+                or headers.get('X-Api-Key')
+            )
+
+            expected_key = config.LEVEL_EVENTS_API_KEY
+            if not expected_key:
+                return APIResponse.error(
+                    "Endpoint not configured",
+                    status_code=503,
+                    origin=origin
+                )
+            if provided_key != expected_key:
+                return APIResponse.error(
+                    "Invalid or missing api_key",
+                    status_code=401,
+                    error_code="UNAUTHORIZED",
+                    origin=origin
+                )
+
+            import boto3
+            dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+            table = dynamodb.Table(config.TABLE_LEVEL_EVENTS)
+
+            items = []
+            scan_kwargs = {}
+            while True:
+                response = table.scan(**scan_kwargs)
+                items.extend(response.get('Items', []))
+                last = response.get('LastEvaluatedKey')
+                if not last:
+                    break
+                scan_kwargs['ExclusiveStartKey'] = last
+
+            # Sort by eventTime ascending
+            items.sort(key=lambda x: x.get('eventTime', ''))
+
+            return APIResponse.success({
+                'count': len(items),
+                'events': items
+            }, origin=origin)
+
+        except Exception as e:
+            logger.error("Level events fetch error", error=e)
+            return APIResponse.server_error(origin=origin)
+
+    return APIResponse.not_found("Events endpoint", origin)
 
 
 @require_auth()
