@@ -2886,7 +2886,9 @@ def handle_spend_key(event, context, user_id):
 def handle_events(event, context, method, path, origin):
     """Handle external event endpoints — no user auth, API key protected."""
 
-    # GET /events/level-ups — returns full hive_level_events table
+    # GET /events/level-ups — current levels for all wallet-linked users
+    # Default: recalculate from source tables and save snapshot
+    # ?recalculate=false: return cached snapshot without recalculating
     if path == 'events/level-ups' and method == 'GET':
         try:
             # Validate API key (query param or header)
@@ -2900,61 +2902,96 @@ def handle_events(event, context, method, path, origin):
 
             expected_key = config.LEVEL_EVENTS_API_KEY
             if not expected_key:
-                return APIResponse.error(
-                    "Endpoint not configured",
-                    status_code=503,
-                    origin=origin
-                )
+                return APIResponse.error("Endpoint not configured", status_code=503, origin=origin)
             if provided_key != expected_key:
-                return APIResponse.error(
-                    "Invalid or missing api_key",
-                    status_code=401,
-                    error_code="UNAUTHORIZED",
-                    origin=origin
-                )
+                return APIResponse.error("Invalid or missing api_key", status_code=401, error_code="UNAUTHORIZED", origin=origin)
 
             import boto3
             dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
-            table = dynamodb.Table(config.TABLE_LEVEL_EVENTS)
+            level_table = dynamodb.Table(config.TABLE_LEVEL_EVENTS)
 
-            items = []
-            scan_kwargs = {}
-            while True:
-                response = table.scan(**scan_kwargs)
-                items.extend(response.get('Items', []))
-                last = response.get('LastEvaluatedKey')
-                if not last:
-                    break
-                scan_kwargs['ExclusiveStartKey'] = last
+            recalculate = params.get('recalculate', 'true').lower() != 'false'
 
-            # Sort by eventTime ascending
-            items.sort(key=lambda x: x.get('eventTime', ''))
+            if recalculate:
+                # Scan hive_users for every user that has a wallet linked
+                users_table = dynamodb.Table(config.TABLE_USERS)
+                player_table = dynamodb.Table(config.TABLE_PLAYER_DATA)
 
-            # Build userId → walletId mapping (avoid exposing internal user IDs)
-            unique_user_ids = list({item['userId'] for item in items if 'userId' in item})
-            users_table = dynamodb.Table(config.TABLE_USERS)
-            user_wallet_map = {}
-            for uid in unique_user_ids:
-                try:
-                    u_resp = users_table.get_item(Key={'user_id': uid})
-                    u_item = u_resp.get('Item') or {}
-                    wallet = u_item.get('wallet_address')
-                    if wallet:
-                        user_wallet_map[uid] = wallet
-                except Exception:
-                    pass
+                users = []
+                scan_kwargs = {
+                    'FilterExpression': 'attribute_exists(wallet_address)'
+                }
+                while True:
+                    resp = users_table.scan(**scan_kwargs)
+                    users.extend(resp.get('Items', []))
+                    last = resp.get('LastEvaluatedKey')
+                    if not last:
+                        break
+                    scan_kwargs['ExclusiveStartKey'] = last
 
-            # Replace userId with walletId in each event
-            enriched = []
-            for item in items:
-                uid = item.get('userId')
-                new_item = {k: v for k, v in item.items() if k != 'userId'}
-                new_item['walletId'] = user_wallet_map.get(uid) if uid else None
-                enriched.append(new_item)
+                levels = []
+                now = now_iso()
+                for user in users:
+                    uid = user.get('user_id')
+                    wallet = user.get('wallet_address')
+                    if not uid or not wallet:
+                        continue
+                    try:
+                        p_resp = player_table.get_item(Key={'user_id': uid})
+                        level = int((p_resp.get('Item') or {}).get('level', 1))
+                    except Exception:
+                        level = 1
+
+                    # Upsert snapshot — wallet address is the key so it always overwrites
+                    try:
+                        level_table.put_item(Item={
+                            'eventId': wallet,
+                            'walletId': wallet,
+                            'level': level,
+                            'updatedAt': now,
+                            'type': 'snapshot'
+                        })
+                    except Exception as write_err:
+                        logger.error("Failed to save level snapshot", error=write_err, wallet=wallet)
+
+                    levels.append({'walletId': wallet, 'level': level})
+
+            else:
+                # Return cached snapshot from table
+                items = []
+                scan_kwargs = {
+                    'FilterExpression': '#t = :snap',
+                    'ExpressionAttributeNames': {'#t': 'type'},
+                    'ExpressionAttributeValues': {':snap': 'snapshot'}
+                }
+                while True:
+                    resp = level_table.scan(**scan_kwargs)
+                    items.extend(resp.get('Items', []))
+                    last = resp.get('LastEvaluatedKey')
+                    if not last:
+                        break
+                    scan_kwargs['ExclusiveStartKey'] = last
+
+                levels = [
+                    {'walletId': item.get('walletId'), 'level': int(item.get('level', 1))}
+                    for item in items
+                ]
+
+            # Deduplicate by walletId — keep highest level (same wallet can map to multiple users)
+            wallet_level_map = {}
+            for entry in levels:
+                w = entry['walletId']
+                if w and (w not in wallet_level_map or entry['level'] > wallet_level_map[w]):
+                    wallet_level_map[w] = entry['level']
+            levels = [{'walletId': w, 'level': lv} for w, lv in wallet_level_map.items()]
+
+            # Sort highest level first
+            levels.sort(key=lambda x: x.get('level', 0), reverse=True)
 
             return APIResponse.success({
-                'count': len(enriched),
-                'events': enriched
+                'count': len(levels),
+                'recalculated': recalculate,
+                'levels': levels
             }, origin=origin)
 
         except Exception as e:
