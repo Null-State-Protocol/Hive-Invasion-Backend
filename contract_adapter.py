@@ -82,9 +82,9 @@ class ContractAdapter:
     # Key prices in Wei (1 SOMI = 10^18 Wei)
     # Must match contract prices
     PRICE_WEI = {
-        "bronze": 100000000000000000,   # 0.1 SOMI (Bronze Key on contract)
-        "silver": 200000000000000000,   # 0.2 SOMI (Silver Key on contract)
-        "gold":   300000000000000000    # 0.3 SOMI (Gold Key on contract)
+        "bronze": 6000000000000000000,    # 6 SOMI (Bronze Key on contract)
+        "silver": 10000000000000000000,   # 10 SOMI (Silver Key on contract)
+        "gold":   20000000000000000000    # 20 SOMI (Gold Key on contract)
     }
     
     # Payment mode (set via environment or default to dual mode for development)
