@@ -100,14 +100,25 @@ class AnalyticsService:
             
             # Calculate TTL (90 days retention for analytics)
             ttl = int(now.timestamp()) + (90 * 86400)
-            
+
+            def _sanitize(obj):
+                """Recursively convert float -> Decimal for DynamoDB compatibility."""
+                from decimal import Decimal
+                if isinstance(obj, float):
+                    return Decimal(str(obj))
+                if isinstance(obj, dict):
+                    return {k: _sanitize(v) for k, v in obj.items()}
+                if isinstance(obj, list):
+                    return [_sanitize(v) for v in obj]
+                return obj
+
             item = {
                 "event_id": event_id,
                 "timestamp": int(now.timestamp() * 1000),  # Unix timestamp in milliseconds
                 "created_at": now.isoformat(),  # ISO string for readability
                 "user_id": user_id,
                 "event_type": event_type.value,
-                "event_data": event_data,
+                "event_data": _sanitize(event_data),
                 "ttl": ttl
             }
             

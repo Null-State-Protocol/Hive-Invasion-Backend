@@ -326,12 +326,13 @@ class ContractAdapter:
                     purchase_id = int(topics[1], 16)
                     
                     # topics[2] = buyer (address, 20 bytes)
-                    # Address is stored in 32-byte field, address is last 20 bytes
+                    # Address is stored in 32-byte field, right-aligned with 12 bytes (24 hex chars) of zero padding
                     buyer_hex = topics[2]
                     if buyer_hex.startswith("0x"):
                         buyer_hex = buyer_hex[2:]
-                    # Remove leading zeros to get address
-                    buyer = "0x" + buyer_hex[-40:].lstrip("0") or "0x0"
+                    # Take last 40 hex chars (20 bytes = address). Do NOT lstrip("0") — that would
+                    # corrupt addresses whose own bytes start with 0 (e.g. 0x0AbC...).
+                    buyer = "0x" + buyer_hex[-40:]
                     
                     # topics[3] = productId (uint256)
                     product_id = int(topics[3], 16)

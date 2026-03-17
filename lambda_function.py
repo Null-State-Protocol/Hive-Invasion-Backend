@@ -4,6 +4,7 @@ Unified API for mobile and web platforms
 """
 
 import json
+import time
 from datetime import datetime, timezone, timedelta
 
 # Import utilities
@@ -1716,6 +1717,45 @@ def handle_remove_boost(event, context, user_id):
 
 # ==================== LEADERBOARD HANDLERS ====================
 
+# Module-level cache: table_name → {'entries': [raw DDB items sorted desc], 'expires': float}
+# TTL 60 s — shared between list and rank endpoints to avoid redundant scans
+_LB_CACHE: dict = {}
+_LB_CACHE_TTL = 60  # seconds
+
+
+def _lb_full_scan(table):
+    """Paginate through an entire DynamoDB table and return all items."""
+    items = []
+    kwargs = {}
+    while True:
+        resp = table.scan(**kwargs)
+        items.extend(resp.get('Items', []))
+        last_key = resp.get('LastEvaluatedKey')
+        if not last_key:
+            break
+        kwargs['ExclusiveStartKey'] = last_key
+    return items
+
+
+def _lb_get_sorted_entries(dynamodb, table_name):
+    """
+    Return sorted leaderboard entries for *table_name*.
+    Uses _LB_CACHE (TTL=60s).  On cache-miss does a full paginated scan.
+    Entries are sorted by score descending.  Result is **raw DDB items**
+    (always contain 'user_id' and 'score').
+    """
+    now_ts = time.time()
+    cached = _LB_CACHE.get(table_name)
+    if cached and cached['expires'] > now_ts:
+        return cached['entries']
+
+    table = dynamodb.Table(table_name)
+    entries = _lb_full_scan(table)
+    entries.sort(key=lambda x: int(x.get('score', 0) or 0), reverse=True)
+    _LB_CACHE[table_name] = {'entries': entries, 'expires': now_ts + _LB_CACHE_TTL}
+    return entries
+
+
 def handle_leaderboard(event, context, method, path, origin):
     """Handle leaderboard endpoints"""
     try:
@@ -1741,51 +1781,64 @@ def handle_leaderboard(event, context, method, path, origin):
 
 
 def _handle_leaderboard_with_period(event, context, period, origin):
-    """Internal wrapper for leaderboard data with period"""
+    """Internal wrapper for leaderboard data with period.
+
+    Flow:
+      1. Check module-level _LB_CACHE (TTL 60 s) — skip DB entirely on hit.
+      2. On cache miss: full paginated scan (not scan(Limit=N) which is unreliable).
+      3. Sort all entries desc by score, take top 100.
+      4. Single batch_get_item call (≤100 keys) to resolve usernames — no N+1.
+      5. Store raw sorted entries in cache so /leaderboard/rank reuses them.
+    """
     try:
         import boto3
         dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
-        
-        # Map period to table
+
         table_map = {
-            'daily': config.TABLE_LEADERBOARD_DAILY,
-            'weekly': config.TABLE_LEADERBOARD_WEEKLY,
-            'alltime': config.TABLE_LEADERBOARD_ALLTIME
+            'daily':   config.TABLE_LEADERBOARD_DAILY,
+            'weekly':  config.TABLE_LEADERBOARD_WEEKLY,
+            'alltime': config.TABLE_LEADERBOARD_ALLTIME,
         }
-        
         table_name = table_map.get(period)
         if not table_name:
             return APIResponse.error("Invalid period", status_code=400, origin=origin)
-        
-        leaderboard_table = dynamodb.Table(table_name)
-        
-        # Query leaderboard (limit to top 100)
-        response = leaderboard_table.scan(Limit=100)
-        entries = response.get('Items', [])
-        
-        # Sort by score descending
-        entries.sort(key=lambda x: x.get('score', 0), reverse=True)
-        
-        # Get user data for each entry
+
+        # Get sorted raw entries (cached or fresh scan)
+        all_entries = _lb_get_sorted_entries(dynamodb, table_name)
+        top_entries = all_entries[:100]
+
+        if not top_entries:
+            return APIResponse.success({'leaderboard': []}, origin=origin)
+
+        # Resolve usernames — prefer username stored directly in leaderboard entry
+        # (written by handle_update_high_score), fall back to get_item on hive_users.
+        # get_item calls are rare: result is cached 60s, so this loop runs at most
+        # once per minute per table regardless of concurrent request volume.
         users_table = dynamodb.Table(config.TABLE_USERS)
+        user_map = {}
+        for entry in top_entries:
+            uid = entry['user_id']
+            if 'username' in entry:
+                # Already embedded in leaderboard row — no DB call needed
+                user_map[uid] = {'username': entry['username'], 'email': entry.get('email', '')}
+            else:
+                resp = users_table.get_item(Key={'user_id': uid})
+                user_map[uid] = resp.get('Item', {})
+
         leaderboard = []
-        
-        for entry in entries[:100]:  # Top 100
-            user_response = users_table.get_item(Key={"user_id": entry['user_id']})
-            user = user_response.get('Item', {})
-            
-            # Use actual username if set, otherwise fall back to email-derived username
-            username = user.get('username') or user.get('email', '').split('@')[0]
-            
+        for rank, entry in enumerate(top_entries, start=1):
+            user = user_map.get(entry['user_id'], {})
+            username = user.get('username') or user.get('email', '').split('@')[0] or 'Unknown'
             leaderboard.append({
-                'username': username,
-                'score': entry.get('score', 0),
-                'level': entry.get('level', 1),
-                'timestamp': entry.get('updated_at', entry.get('created_at'))
+                'rank':      rank,
+                'username':  username,
+                'score':     int(entry.get('score', 0) or 0),
+                'level':     int(entry.get('level', 1) or 1),
+                'timestamp': entry.get('updated_at', entry.get('timestamp', entry.get('created_at'))),
             })
-        
+
         return APIResponse.success({'leaderboard': leaderboard}, origin=origin)
-    
+
     except Exception as e:
         logger.error("Leaderboard data error", error=e, period=period)
         return APIResponse.server_error(origin=origin)
@@ -1793,58 +1846,41 @@ def _handle_leaderboard_with_period(event, context, period, origin):
 
 @require_auth()
 def handle_player_rank(event, context, user_id):
-    """Get player's current rank"""
+    """Get player's current rank.
+
+    Reuses _LB_CACHE populated by _lb_get_sorted_entries so that concurrent
+    requests (or a prior leaderboard list call) avoid redundant full table scans.
+    Each table is scanned at most once per _LB_CACHE_TTL window.
+    """
     origin = get_origin(event)
-    
+
     try:
         import boto3
-        from boto3.dynamodb.conditions import Key
         dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
 
-        def get_rank(table_name, period=None):
-            table = dynamodb.Table(table_name)
-            if period:
-                response = table.query(
-                    KeyConditionExpression=Key('period').eq(period)
-                )
-                items = response.get('Items', [])
-            else:
-                response = table.scan()
-                items = response.get('Items', [])
-
-            if not items:
-                return None
-
-            items.sort(key=lambda x: x.get('score', 0), reverse=True)
-            for idx, item in enumerate(items, start=1):
+        def _rank_in_table(table_name):
+            """Return (rank, score) for user_id in the given leaderboard table."""
+            entries = _lb_get_sorted_entries(dynamodb, table_name)
+            for idx, item in enumerate(entries, start=1):
                 if item.get('user_id') == user_id:
-                    return idx
-            return None
+                    return idx, int(item.get('score', 0) or 0)
+            return None, 0
 
-        daily_rank = get_rank(config.TABLE_LEADERBOARD_DAILY, period='daily')
-        weekly_rank = get_rank(config.TABLE_LEADERBOARD_WEEKLY, period='weekly')
-        alltime_rank = get_rank(config.TABLE_LEADERBOARD_ALLTIME)
-
-        # Unity compatibility: include flat rank/score/period
-        alltime_score = 0
-        try:
-            alltime_table = dynamodb.Table(config.TABLE_LEADERBOARD_ALLTIME)
-            alltime_item = alltime_table.get_item(Key={'user_id': user_id}).get('Item', {})
-            alltime_score = int(alltime_item.get('score', 0) or 0)
-        except Exception:
-            alltime_score = 0
+        alltime_rank, alltime_score = _rank_in_table(config.TABLE_LEADERBOARD_ALLTIME)
+        daily_rank,   _             = _rank_in_table(config.TABLE_LEADERBOARD_DAILY)
+        weekly_rank,  _             = _rank_in_table(config.TABLE_LEADERBOARD_WEEKLY)
 
         return APIResponse.success({
-            'rank': alltime_rank,
+            'rank':  alltime_rank,
             'rank_map': {
-                'daily': daily_rank,
-                'weekly': weekly_rank,
-                'alltime': alltime_rank
+                'daily':   daily_rank,
+                'weekly':  weekly_rank,
+                'alltime': alltime_rank,
             },
             'period': 'alltime',
-            'score': alltime_score
+            'score':  alltime_score,
         }, origin=origin)
-    
+
     except Exception as e:
         logger.error("Player rank error", error=e, user_id=user_id)
         return APIResponse.server_error(origin=origin)
