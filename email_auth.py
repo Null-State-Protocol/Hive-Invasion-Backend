@@ -3,6 +3,7 @@ Email-based authentication
 Registration, login, password reset, email verification
 """
 
+import re
 import uuid
 from datetime import datetime, timezone, timedelta
 from typing import Dict, Optional, Tuple
@@ -17,6 +18,85 @@ from validation import Validator, ValidationError
 from jwt_handler import JWTHandler
 from logger import logger
 from email_service import EmailService
+
+
+BLOCKED_EMAIL_DOMAINS = {
+    'rambler.ru', 'kubi91.icu', 'mailnull.com', 'guerrillamail.com',
+    'tempmail.com', 'throwaway.email', 'yopmail.com', 'trashmail.com',
+    'sharklasers.com', 'guerrillamailblock.com', 'grr.la', 'guerrillamail.info',
+    'spam4.me', 'dispostable.com', 'mailinator.com', 'maildrop.cc',
+    'fakeinbox.com', 'tempr.email', 'discard.email', 'spamgourmet.com',
+    'sharebot.net', 'razeny.com', 'moneylogtips.com', 'btcmod.com',
+    'edudingy.cfd', 'coffeepancakewafflebacon.com',
+    # Bot/spam domains seen in attack (18 Mar 2026)
+    'mail.ru', 'list.ru', 'inbox.ru', 'bk.ru', 'internet.ru',
+    'email.com', 'gamil.com',  # common typo-squat domains
+    # Bot domains seen in attack (19 Mar 2026)
+    'maxric.com', 'tgvis.com', 'steveix.com', 'anypsd.com',
+    'cevipsa.com', 'cpav3.com', 'tenvil.com', 'amozix.com',
+    'nuclene.com', 'chromomail.com', 'bolivianomail.com',
+    'fexpost.com', 'daymailonline.com', 'spamex.com', 'yevme.com',
+}
+
+BLOCKED_EMAIL_DOMAIN_SUFFIXES = (
+    '.mailinator.com',
+    '.guerrillamail.com',
+    '.guerrillamailblock.com',
+    '.spamgourmet.com',
+    '.trashmail.com',
+    '.yopmail.com',
+    '.tempmail.com',
+    '.maildrop.cc',
+    '.mailnull.com',
+)
+
+BLOCKED_EMAIL_TLDS = {
+    '.icu', '.cfd', '.tk', '.ml', '.ga', '.cf', '.gq', '.buzz', '.click', '.top'
+}
+
+
+# Bot username pattern: 8+ lowercase letters + exactly 4 digits (e.g. smartfire8842, luckywolf4878)
+# Only applied for non-major email providers to avoid false positives on real users.
+_BOT_USERNAME_RE = re.compile(r'^[a-z]{8,}\d{4}$')
+_MAJOR_EMAIL_PROVIDERS = {
+    'gmail.com', 'googlemail.com',
+    'hotmail.com', 'hotmail.co.uk', 'hotmail.fr',
+    'outlook.com', 'outlook.jp', 'live.com', 'msn.com',
+    'yahoo.com', 'yahoo.co.uk', 'yahoo.fr', 'yahoo.jp',
+    'icloud.com', 'me.com', 'mac.com',
+    'proton.me', 'protonmail.com',
+    'yandex.com', 'yandex.ru',
+}
+
+
+def is_bot_username(local_part: str, domain: str) -> bool:
+    """Return True when username matches known bot generation pattern.
+    Only active for non-major email providers to avoid false positives."""
+    if domain.lower() in _MAJOR_EMAIL_PROVIDERS:
+        return False
+    return bool(_BOT_USERNAME_RE.match(local_part.lower()))
+
+
+def get_email_domain_block_reason(email_domain: str) -> Optional[str]:
+    """Return reason string when an email domain should be blocked."""
+    if not email_domain:
+        return None
+
+    domain = email_domain.lower().strip()
+
+    if domain in BLOCKED_EMAIL_DOMAINS:
+        return f"domain:{domain}"
+
+    for suffix in BLOCKED_EMAIL_DOMAIN_SUFFIXES:
+        if domain.endswith(suffix):
+            return f"suffix:{suffix}"
+
+    if '.' in domain:
+        tld = f".{domain.rsplit('.', 1)[-1]}"
+        if tld in BLOCKED_EMAIL_TLDS:
+            return f"tld:{tld}"
+
+    return None
 
 
 class EmailAuthService:
@@ -60,6 +140,27 @@ class EmailAuthService:
                 print(f"[REGISTER] Invalid email: {email}")
                 return False, None, "Invalid email address"
             
+            # Block disposable/spam email domains (exact + suffix + TLD)
+            email_domain = email.split('@')[1].lower() if '@' in email else ''
+            block_reason = get_email_domain_block_reason(email_domain)
+            if block_reason:
+                logger.warning(
+                    "Registration blocked - disposable/spam email domain",
+                    context={"email": email, "domain": email_domain, "reason": block_reason}
+                )
+                print(f"[REGISTER] Blocked domain ({block_reason}): {email_domain}")
+                return False, None, "Registration not allowed from this email provider."
+
+            # Block obvious bot usernames: word+digits pattern (e.g. smartfire8842)
+            email_local = email.split('@')[0] if '@' in email else email
+            if is_bot_username(email_local, email_domain):
+                logger.warning(
+                    "Registration blocked - bot username pattern",
+                    context={"email": email, "local": email_local}
+                )
+                print(f"[REGISTER] Blocked bot pattern username: {email_local}")
+                return False, None, "Registration not allowed from this email provider."
+
             # Validate password strength (required)
             is_strong, password_error = PasswordHasher.validate_password_strength(password)
             if not is_strong:
@@ -73,14 +174,105 @@ class EmailAuthService:
                 print(f"[REGISTER] Checking if email exists...")
                 response = self.user_emails_table.get_item(Key={"email": email})
                 if "Item" in response:
-                    # Email already registered and account created
-                    logger.info("Registration attempt with existing email", context={"email": email})
-                    print(f"[REGISTER] Email already registered")
-                    return False, None, "Email already registered"
+                    # Email is in the email-mapping table. But check if the actual
+                    # user account exists in hive_users — partial failures can leave
+                    # an orphan email-mapping entry with no backing user record.
+                    mapped_user_id = response["Item"].get("user_id")
+                    user_exists = False
+                    if mapped_user_id:
+                        try:
+                            ur = self.users_table.get_item(Key={"user_id": mapped_user_id})
+                            user_exists = "Item" in ur
+                        except Exception:
+                            pass
+
+                    if user_exists:
+                        # Fully registered account — cannot re-register
+                        logger.info("Registration attempt with existing email", context={"email": email})
+                        print(f"[REGISTER] Email already registered")
+                        return False, None, "An account with this email already exists. Please log in or use the forgot password option."
+                    else:
+                        # Orphan mapping (partial account creation failure) — clean it up
+                        # and allow re-registration so the user is not permanently blocked.
+                        logger.warning(
+                            "Orphan email mapping found — no backing user record, cleaning up",
+                            context={"email": email, "orphan_user_id": mapped_user_id}
+                        )
+                        print(f"[REGISTER] Orphan email mapping detected, removing and allowing re-registration")
+                        try:
+                            self.user_emails_table.delete_item(Key={"email": email})
+                        except Exception:
+                            pass
             except ClientError as e:
                 logger.error("Error checking email existence", error=e, context={"email": email})
                 print(f"[REGISTER] Error checking email: {e}")
                 pass
+
+            # Rate limit / resend logic for unverified pending registrations.
+            # - < 60 s  : too soon, ask user to wait
+            # - 60 s – 24 h : resend a fresh code (covers expired codes too)
+            # - expired  : fall through to fresh registration
+            try:
+                existing_pending = self.verification_table.get_item(Key={"email": email}).get("Item")
+            except Exception:
+                existing_pending = None  # DB error — proceed to fresh registration
+
+            if existing_pending and not existing_pending.get("is_used"):
+                created_at_str = existing_pending.get("created_at", "")
+                try:
+                    created_at_dt = datetime.fromisoformat(created_at_str.replace("Z", "+00:00"))
+                    seconds_ago = (datetime.now(timezone.utc) - created_at_dt).total_seconds()
+                except Exception:
+                    seconds_ago = 9999  # parse error — treat as old
+
+                if seconds_ago < 60:  # Hard cooldown — too soon
+                    wait = int(60 - seconds_ago)
+                    logger.warning("Registration rate limited", context={"email": email, "wait_seconds": wait})
+                    print(f"[REGISTER] Rate limited, wait {wait}s for {email}")
+                    return False, None, f"Verification email already sent. Please check your inbox (and spam folder) or wait {wait} seconds."
+
+                # 60 s or more: resend a fresh code
+                # (covers both the 60s-5min window AND expired codes where user retries)
+                try:
+                    from security import TokenGenerator
+                    new_code = TokenGenerator.generate_verification_code(length=4)
+                    new_now = now_iso()
+                    new_expires = (datetime.now(timezone.utc) + timedelta(hours=config.EMAIL_VERIFICATION_EXPIRE_HOURS)).isoformat()
+                    # Keep same user_id + password_hash from the existing pending record
+                    self.verification_table.update_item(
+                        Key={"email": email},
+                        UpdateExpression="SET #code = :code, created_at = :now, expires_at = :exp, is_used = :f",
+                        ExpressionAttributeNames={"#code": "code"},
+                        ExpressionAttributeValues={
+                            ":code": new_code,
+                            ":now": new_now,
+                            ":exp": new_expires,
+                            ":f": False,
+                        }
+                    )
+                    print(f"[REGISTER] Resending verification code to {email}...")
+                    send_success = self.email_service.send_verification_code_email(email, new_code)
+                    logger.info("Verification code resent on re-registration attempt", context={"email": email, "seconds_since_last": int(seconds_ago)})
+                    if send_success:
+                        print(f"[REGISTER] Resend OK for {email}")
+                        return True, {
+                            "email": email,
+                            "message": "A new verification code has been sent to your email. Please check your inbox and spam folder.",
+                            "email_verification_required": True,
+                            "resent": True
+                        }, None
+                    else:
+                        print(f"[REGISTER] Resend FAILED (email_service returned False) for {email}")
+                        logger.error("Failed to resend verification email", context={"email": email})
+                        return False, None, "Failed to send verification email. Please try again."
+                except Exception as resend_err:
+                    import traceback
+                    print(f"[REGISTER] Resend exception for {email}: {resend_err}")
+                    logger.error("Exception during verification resend", error=resend_err, context={
+                        "email": email,
+                        "traceback": traceback.format_exc()
+                    })
+                    return False, None, "Failed to send verification email. Please try again."
             
             # Generate temporary user_id for pending registration
             logger.debug("Creating pending registration", context={"email": email})
@@ -187,8 +379,9 @@ class EmailAuthService:
                 logger.warning("Failed login attempt - invalid password", context={"user_id": user_id, "email": email})
                 return False, None, "Invalid email or password"
             
-            # Check if 2-step login is required (user-specific setting or global config)
-            require_verification = user_data.get("require_email_verification", config.ENABLE_EMAIL_VERIFICATION)
+            # Check if 2-step login is required (user-specific opt-in ONLY, not global default)
+            # Default is False - users must explicitly have require_email_verification=True to get 2-step
+            require_verification = user_data.get("require_email_verification", False)
             if require_verification:
                 # For 2-step login, ALWAYS require email verification on each login
                 # Return special error that triggers verification code flow
@@ -571,6 +764,26 @@ class EmailAuthService:
             # Check if already verified
             if verification_data.get("is_used"):
                 return False, "Email already verified"
+
+            # Rate limit: max 5 resends per session, 60s cooldown between resends
+            MAX_RESENDS = 5
+            RESEND_COOLDOWN_SECONDS = 60
+            resend_count = int(verification_data.get("resend_count", 0))
+            last_resend_at = verification_data.get("last_resend_at")
+
+            if resend_count >= MAX_RESENDS:
+                logger.warning("Resend limit reached", context={"email": email, "resend_count": resend_count})
+                return False, "Too many code requests. Please wait and try registering again later."
+
+            if last_resend_at:
+                try:
+                    last_dt = datetime.fromisoformat(last_resend_at.replace("Z", "+00:00"))
+                    seconds_since = (datetime.now(timezone.utc) - last_dt).total_seconds()
+                    if seconds_since < RESEND_COOLDOWN_SECONDS:
+                        wait = int(RESEND_COOLDOWN_SECONDS - seconds_since)
+                        return False, f"Please wait {wait} seconds before requesting a new code."
+                except Exception:
+                    pass
             
             user_id = verification_data["user_id"]
             password_hash = verification_data.get("password_hash")  # For registration flow
@@ -612,9 +825,21 @@ class EmailAuthService:
             send_success = self.email_service.send_verification_code_email(email, verification_code)
             
             if send_success:
+                # Update resend tracking in DynamoDB
+                try:
+                    self.verification_table.update_item(
+                        Key={"email": email},
+                        UpdateExpression="SET resend_count = :rc, last_resend_at = :ts",
+                        ExpressionAttributeValues={
+                            ":rc": resend_count + 1,
+                            ":ts": datetime.now(timezone.utc).isoformat()
+                        }
+                    )
+                except Exception:
+                    pass  # Don't fail the resend if tracking update fails
                 logger.info(
                     "Verification code resent",
-                    context={"email": email, "user_id": user_id}
+                    context={"email": email, "user_id": user_id, "resend_count": resend_count + 1}
                 )
                 return True, None
             else:

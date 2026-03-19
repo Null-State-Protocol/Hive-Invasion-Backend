@@ -1,6 +1,8 @@
 # AWS SDK
-boto3>=1.34.0
-botocore>=1.34.0
+# boto3 and botocore are pre-installed in Lambda Python runtime — DO NOT bundle them.
+# Bundling them adds ~26MB to the deployment package unnecessarily.
+# boto3>=1.34.0
+# botocore>=1.34.0
 
 # Authentication & Security
 PyJWT>=2.8.0

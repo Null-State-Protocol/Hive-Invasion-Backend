@@ -38,6 +38,9 @@ echo ""
 echo "🧹 Cleaning previous builds..."
 rm -f lambda-deploy.zip
 rm -rf package/
+# Remove stale named deploy zips (fix1, fix2, ... archive zips) — keep only lambda-deploy.zip
+rm -f lambda_deploy_*.zip lambda_package.zip
+rm -rf lambda_package/
 echo ""
 
 # Create package directory
@@ -58,15 +61,49 @@ else
 fi
 echo ""
 
-# Copy source files
+# Copy source files (explicitly listed — test/migration/broken files excluded)
 echo "📋 Copying source files..."
-cp *.py package/
+SOURCE_FILES="
+    analytics.py
+    config.py
+    contract_adapter.py
+    decorators.py
+    dust_rewards.py
+    email_auth.py
+    email_service.py
+    jwt_handler.py
+    lambda_function.py
+    logger.py
+    models.py
+    responses.py
+    security.py
+    validation.py
+    wallet_auth.py
+"
+for f in $SOURCE_FILES; do
+    f=$(echo $f | xargs)  # trim whitespace
+    [ -z "$f" ] && continue
+    if [ -f "$f" ]; then
+        cp "$f" package/
+        echo "   ✅ $f"
+    else
+        echo "   ⚠️  $f bulunamadı, atlandı"
+    fi
+done
 echo ""
 
 # Create deployment zip
 echo "📦 Creating ZIP archive..."
 cd package
-zip -r ../lambda-deploy.zip . -x "*.pyc" -x "*__pycache__*" -x "*.dist-info/*"
+zip -r ../lambda-deploy.zip . \
+    -x "*.pyc" \
+    -x "*/__pycache__/*" \
+    -x "*__pycache__*" \
+    -x "*.dist-info/*" \
+    -x "*/tests/*" \
+    -x "*/test/*" \
+    -x "*_test.py" \
+    -x "test_*.py"
 cd ..
 echo ""
 
@@ -117,36 +154,71 @@ fi
 
 # Update environment variables
 echo "🔧 Setting environment variables..."
-aws lambda update-function-configuration \
+
+# Read existing JWT_SECRET to preserve active sessions
+echo "🔑 Reading existing JWT_SECRET from Lambda..."
+EXISTING_JWT_SECRET=$(aws lambda get-function-configuration \
     --function-name $FUNCTION_NAME \
-    --environment "Variables={
-        AWS_REGION=$REGION,
-        TABLE_USERS=hive_users,
-        TABLE_USER_EMAILS=hive_user_emails,
-        TABLE_USER_WALLETS=hive_user_wallets,
-        TABLE_SESSIONS=hive_sessions,
-        TABLE_PLAYER_DATA=hive_player_data,
-        TABLE_ACHIEVEMENTS=hive_achievements,
-        TABLE_LEADERBOARD_DAILY=hive_leaderboard_daily,
-        TABLE_LEADERBOARD_WEEKLY=hive_leaderboard_weekly,
-        TABLE_LEADERBOARD_ALLTIME=hive_leaderboard_alltime,
-        TABLE_LOGS=hive_logs,
-        TABLE_ANALYTICS=hive_analytics,
-        TABLE_EMAIL_VERIFICATION=hive_email_verification,
-        TABLE_PASSWORD_RESET=hive_password_reset,
-        JWT_SECRET=$(openssl rand -hex 32),
-        JWT_ACCESS_TOKEN_EXPIRE_MINUTES=60,
-        JWT_REFRESH_TOKEN_EXPIRE_DAYS=30,
-        ENVIRONMENT=production,
-        LOG_LEVEL=INFO,
-        KEY_PURCHASE_ENABLED=true,
-        REPLAY_SECRET=${REPLAY_SECRET},
-        REPLAY_ADMIN_TOKEN=${REPLAY_ADMIN_TOKEN},
-        SOMNIA_RPC_MAINNET=https://api.infra.mainnet.somnia.network/,
-        SOMNIA_TREASURY_WALLET=0xEbD49456f4b448E9455bDD89B42e7EFD24567D60
-    }" \
     --region $REGION \
-    --no-cli-pager &> /dev/null
+    --query 'Environment.Variables.JWT_SECRET' \
+    --output text 2>/dev/null)
+
+if [ -z "$EXISTING_JWT_SECRET" ] || [ "$EXISTING_JWT_SECRET" = "None" ]; then
+    echo "   ⚠️  No existing JWT_SECRET found, generating new one..."
+    EXISTING_JWT_SECRET=$(openssl rand -hex 32)
+else
+    echo "   ✅ Using existing JWT_SECRET (active sessions preserved)"
+fi
+
+# NOTE: AWS_REGION is a reserved Lambda env key — do NOT include it.
+# Use Python to build the JSON payload, avoiding shell quoting/interpolation issues.
+python3 - <<PYEOF
+import subprocess, json, sys
+
+env_vars = {
+    "TABLE_USERS": "hive_users",
+    "TABLE_USER_EMAILS": "hive_user_emails",
+    "TABLE_USER_WALLETS": "hive_user_wallets",
+    "TABLE_SESSIONS": "hive_sessions",
+    "TABLE_PLAYER_DATA": "hive_player_data",
+    "TABLE_ACHIEVEMENTS": "hive_achievements",
+    "TABLE_LEADERBOARD_DAILY": "hive_leaderboard_daily",
+    "TABLE_LEADERBOARD_WEEKLY": "hive_leaderboard_weekly",
+    "TABLE_LEADERBOARD_ALLTIME": "hive_leaderboard_alltime",
+    "TABLE_LOGS": "hive_logs",
+    "TABLE_ANALYTICS": "hive_analytics",
+    "TABLE_EMAIL_VERIFICATION": "hive_email_verification",
+    "TABLE_PASSWORD_RESET": "hive_password_reset",
+    "TABLE_DUST_REWARDS": "hive_dust_rewards",
+    "JWT_SECRET": "$EXISTING_JWT_SECRET",
+    "JWT_ACCESS_TOKEN_EXPIRE_MINUTES": "60",
+    "JWT_REFRESH_TOKEN_EXPIRE_DAYS": "30",
+    "ENVIRONMENT": "production",
+    "LOG_LEVEL": "INFO",
+    "KEY_PURCHASE_ENABLED": "true",
+    "SOMNIA_RPC_MAINNET": "https://api.infra.mainnet.somnia.network/",
+    "SOMNIA_TREASURY_WALLET": "0xEbD49456f4b448E9455bDD89B42e7EFD24567D60",
+    "SENDER_EMAIL": "noreply@hiveinvasion.games",
+    "ENABLE_EMAIL_VERIFICATION": "true",
+    "ALLOWED_ORIGINS": "https://hiveinvasion.io,https://www.hiveinvasion.io,https://hive-invasion-website.kagan-fa3.workers.dev",
+}
+
+result = subprocess.run([
+    "aws", "lambda", "update-function-configuration",
+    "--function-name", "$FUNCTION_NAME",
+    "--region", "$REGION",
+    "--environment", json.dumps({"Variables": env_vars}),
+    "--no-cli-pager"
+], capture_output=True, text=True)
+
+if result.returncode == 0:
+    data = json.loads(result.stdout)
+    count = len(data.get("Environment", {}).get("Variables", {}))
+    print(f"   ✅ {count} env var set edildi.")
+else:
+    print("   ❌ Env var hatasi:", result.stderr[:300], file=sys.stderr)
+    sys.exit(1)
+PYEOF
 
 echo "✅ Environment variables set"
 echo ""

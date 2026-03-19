@@ -462,94 +462,87 @@ def get_key_ownership(user_id):
 def add_key_to_player(user_id, key_type, purchase_event):
     """
     Add a key to player's inventory and record purchase event with idempotency.
-    
-    Uses tx_index map to guard against duplicate tx_hash processing.
-    
+
+    Fully atomic: uses DynamoDB ADD for keys_owned (no read-modify-write race),
+    SET path for tx_index entry (no full-map overwrite race),
+    list_append for purchase_history (no full-list overwrite race).
+
     Args:
         user_id: User UUID
         key_type: "bronze", "silver", or "gold"
         purchase_event: Purchase event dict from contract_adapter
-    
+
     Returns:
         dict: Updated key ownership {bronze: int, silver: int, gold: int}
-        
+
     Raises:
         Exception: If tx_hash already processed (ConditionExpression fails)
     """
     from botocore.exceptions import ClientError
-    
-    table = dynamodb.Table('hive_player_data')
-    tx_hash = purchase_event.get('tx_hash', '')
 
-    # Validate existing attribute types to avoid invalid path errors
-    existing = table.get_item(
-        Key={'user_id': user_id},
-        ProjectionExpression='keys_owned, key_purchase_history, tx_index'
-    ).get('Item', {})
-
-    if 'tx_index' in existing and not isinstance(existing.get('tx_index'), dict):
-        raise Exception('TX_INDEX_TYPE_INVALID')
-    if 'keys_owned' in existing and not isinstance(existing.get('keys_owned'), dict):
-        raise Exception('KEYS_OWNED_TYPE_INVALID')
-    if 'key_purchase_history' in existing and not isinstance(existing.get('key_purchase_history'), list):
-        raise Exception('HISTORY_TYPE_INVALID')
-
-    # Build updated values for atomic write (single update_item)
-    current_keys = existing.get('keys_owned', {}) or {}
-    current_keys = {
-        'bronze': Decimal(current_keys.get('bronze', 0) or 0),
-        'silver': Decimal(current_keys.get('silver', 0) or 0),
-        'gold': Decimal(current_keys.get('gold', 0) or 0)
-    }
-    current_keys[key_type] = current_keys.get(key_type, Decimal(0)) + Decimal(1)
-
-    purchase_history = existing.get('key_purchase_history', []) or []
-    purchase_history = [purchase_event] + purchase_history
-    purchase_history = purchase_history[:100]
-
-    tx_index = existing.get('tx_index', {}) or {}
-    tx_index[tx_hash] = True
-
-    # Atomic update: set full maps/lists and updated_at in one write
-    now = datetime.now(timezone.utc).isoformat()
+    table    = dynamodb.Table('hive_player_data')
+    tx_hash  = purchase_event.get('tx_hash', '')
+    now      = datetime.now(timezone.utc).isoformat()
 
     try:
+        # ADIM 1: tx_index ve keys_owned map'lerini yoksa oluştur.
+        # Bu çağrı condition içermez, her zaman güvenli çalışır.
+        # DynamoDB aynı expression'da SET parent + ADD/SET child'a izin vermediği için
+        # (ValidationException: Two document paths overlap) iki ayrı çağrıya bölündü.
+        table.update_item(
+            Key={'user_id': user_id},
+            UpdateExpression=(
+                'SET tx_index    = if_not_exists(tx_index, :empty_map), '
+                '    keys_owned  = if_not_exists(keys_owned, :empty_keys), '
+                '    key_purchase_history = if_not_exists(key_purchase_history, :empty_list)'
+            ),
+            ExpressionAttributeValues={
+                ':empty_map':  {},
+                ':empty_keys': {'bronze': Decimal('0'), 'silver': Decimal('0'), 'gold': Decimal('0')},
+                ':empty_list': [],
+            },
+        )
+
+        # ADIM 2: Asıl atomik yazma — map'ler artık garantili var.
+        #   ADD keys_owned.<type> :one   → eşzamanlı güvenli artırma
+        #   SET tx_index.#tx = :true     → idempotency guard
+        #   SET key_purchase_history = list_append(...)  → atomik ekleme
         response = table.update_item(
             Key={'user_id': user_id},
             UpdateExpression=(
-                'SET '
-                'keys_owned = :keys, '
-                'key_purchase_history = :history, '
-                'tx_index = :tx_index, '
-                'updated_at = :now'
+                'SET tx_index.#tx = :true, '
+                '    key_purchase_history = list_append(key_purchase_history, :new_entry), '
+                '    updated_at = :now '
+                'ADD keys_owned.#key_type :one'
             ),
             ConditionExpression='attribute_not_exists(tx_index.#tx)',
             ExpressionAttributeNames={
-                '#tx': tx_hash
+                '#tx':       tx_hash,
+                '#key_type': key_type,
             },
             ExpressionAttributeValues={
-                ':keys': current_keys,
-                ':history': purchase_history,
-                ':tx_index': tx_index,
-                ':now': now
+                ':true':      True,
+                ':new_entry': [purchase_event],
+                ':one':       Decimal('1'),
+                ':now':       now,
             },
             ReturnValues='ALL_NEW'
         )
 
-        attrs = response.get('Attributes', {})
+        attrs      = response.get('Attributes', {})
         keys_owned = attrs.get('keys_owned', {})
-        current_keys = {
+        result     = {
             'bronze': int(keys_owned.get('bronze', 0) or 0),
             'silver': int(keys_owned.get('silver', 0) or 0),
-            'gold': int(keys_owned.get('gold', 0) or 0)
+            'gold':   int(keys_owned.get('gold',   0) or 0),
         }
 
         logger.info(
-            f"Key added to player with idempotency guard: {key_type}",
-            context={"user_id": user_id, "tx_hash": tx_hash}
+            f"Key added to player (atomic): {key_type}",
+            context={"user_id": user_id, "tx_hash": tx_hash, "keys_owned": result}
         )
 
-        return current_keys
+        return result
 
     except ClientError as e:
         if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
@@ -1149,55 +1142,67 @@ def remove_boost(user_id, boost_id):
 
 def spend_key(user_id, key_type):
     """
-    Spend a key by decrementing owned count.
+    Spend a key by atomically decrementing owned count.
+    Uses DynamoDB ADD with ConditionExpression — no read-modify-write race.
     """
+    from botocore.exceptions import ClientError
+
     table = dynamodb.Table('hive_player_data')
-    response = table.get_item(Key={'user_id': user_id})
-    player_data = response.get('Item', {})
-    keys_owned = player_data.get('keys_owned', {})
-    current = int(keys_owned.get(key_type, 0))
-    if current <= 0:
-        return {'error': 'No keys available'}
-    keys_owned[key_type] = current - 1
-    now = datetime.now(timezone.utc).isoformat()
-    table.update_item(
-        Key={'user_id': user_id},
-        UpdateExpression='SET keys_owned = :keys, updated_at = :now',
-        ExpressionAttributeValues={
-            ':keys': keys_owned,
-            ':now': now
+    now   = datetime.now(timezone.utc).isoformat()
+
+    try:
+        response = table.update_item(
+            Key={'user_id': user_id},
+            UpdateExpression='SET updated_at = :now ADD keys_owned.#key_type :neg_one',
+            ConditionExpression='keys_owned.#key_type >= :one',
+            ExpressionAttributeNames={'#key_type': key_type},
+            ExpressionAttributeValues={
+                ':neg_one': Decimal('-1'),
+                ':one':     Decimal('1'),
+                ':now':     now,
+            },
+            ReturnValues='ALL_NEW'
+        )
+        keys_owned = response.get('Attributes', {}).get('keys_owned', {})
+        return {
+            'keys_owned': {
+                'bronze': int(keys_owned.get('bronze', 0) or 0),
+                'silver': int(keys_owned.get('silver', 0) or 0),
+                'gold':   int(keys_owned.get('gold',   0) or 0),
+            }
         }
-    )
-    return {'keys_owned': keys_owned}
+    except ClientError as e:
+        if e.response['Error']['Code'] == 'ConditionalCheckFailedException':
+            return {'error': 'No keys available'}
+        raise
 
 
 def reward_key(user_id, key_type, amount=1):
     """
     Reward keys to player (from gameplay/achievements).
-    Does not require transaction hash.
+    Does not require transaction hash. Fully atomic — no read needed.
     """
     table = dynamodb.Table('hive_player_data')
-    response = table.get_item(Key={'user_id': user_id})
-    player_data = response.get('Item', {})
-    keys_owned = player_data.get('keys_owned', {})
-    
-    # Ensure keys_owned has all types
-    if not keys_owned:
-        keys_owned = {'bronze': 0, 'silver': 0, 'gold': 0}
-    
-    current = int(keys_owned.get(key_type, 0))
-    keys_owned[key_type] = current + amount
-    
-    now = datetime.now(timezone.utc).isoformat()
-    table.update_item(
+    now   = datetime.now(timezone.utc).isoformat()
+
+    response = table.update_item(
         Key={'user_id': user_id},
-        UpdateExpression='SET keys_owned = :keys, updated_at = :now',
+        UpdateExpression='SET updated_at = :now ADD keys_owned.#key_type :amount',
+        ExpressionAttributeNames={'#key_type': key_type},
         ExpressionAttributeValues={
-            ':keys': keys_owned,
-            ':now': now
-        }
+            ':amount': Decimal(str(amount)),
+            ':now':    now,
+        },
+        ReturnValues='ALL_NEW'
     )
-    return {'keys_owned': keys_owned}
+    keys_owned = response.get('Attributes', {}).get('keys_owned', {})
+    return {
+        'keys_owned': {
+            'bronze': int(keys_owned.get('bronze', 0) or 0),
+            'silver': int(keys_owned.get('silver', 0) or 0),
+            'gold':   int(keys_owned.get('gold',   0) or 0),
+        }
+    }
 
 
 def update_achievement_progress(user_id, achievement_id, progress, is_special_task=False):

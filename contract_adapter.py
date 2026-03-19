@@ -7,8 +7,17 @@ This module supports both payment systems:
 
 import uuid
 import os
-import requests
+import urllib.request
+import urllib.error
+import json as _json
 from datetime import datetime, timezone
+
+def _rpc_post(url: str, payload: dict, timeout: int = 10) -> dict:
+    """stdlib urllib JSON-RPC POST — no external dependencies."""
+    data = _json.dumps(payload).encode()
+    req = urllib.request.Request(url, data=data, headers={"Content-Type": "application/json"})
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return _json.loads(r.read())
 from logger import logger
 from decimal import Decimal
 
@@ -98,6 +107,84 @@ class ContractAdapter:
             contract = ContractAdapter.KEYPAYMENTS_V2_ADDRESS[:8] + "..." if ContractAdapter.KEYPAYMENTS_V2_ADDRESS else "NOT_SET"
             print(f"[Config] Payment System: {mode_str} | Treasury: {treasury} | Contract: {contract}")
             ContractAdapter._CONFIG_LOGGED = True
+
+    # Auto-heal scan window: only scan recent blocks to keep latency low.
+    # Somnia ~1 blok/sn → 3600 blok ≈ son 1 saat.
+    # Her kullanıcı için son tarana bloğu DynamoDB'de saklanır;
+    # yalnızca o bloktan güncel bloğa kadar taranır.
+    AUTO_HEAL_SCAN_WINDOW = 3600   # blok (≈ 1 saat)
+    AUTO_HEAL_MIN_GAP     = 300    # en az bu kadar yeni blok varsa tara (≈ 5 dk)
+
+    @staticmethod
+    def _get_latest_block():
+        """eth_blockNumber → int"""
+        payload = {"jsonrpc": "2.0", "method": "eth_blockNumber", "params": [], "id": 1}
+        resp_data = _rpc_post(ContractAdapter.SOMNIA_RPC_MAINNET, payload, timeout=8)
+        return int(resp_data["result"], 16)
+
+    @staticmethod
+    def fetch_purchased_logs_for_wallet(wallet_address: str, from_block: int, to_block: int) -> list:
+        """
+        Somnia zincirinden belirli bir cüzdan için Purchased event loglarını çeker.
+
+        Tek bir eth_getLogs çağrısı yapar — topics[2] (buyer) filtresiyle sadece
+        bu cüzdana ait eventleri getirir. Yanıt [{"tx_hash", "key_type", "block_number",
+        "paid_wei", "purchase_id"}] formatındadır.
+        """
+        buyer_hex = wallet_address.lower().lstrip("0x").zfill(64)  # 32-byte padded topic
+        buyer_topic = "0x" + buyer_hex
+
+        payload = {
+            "jsonrpc": "2.0", "id": 1,
+            "method": "eth_getLogs",
+            "params": [{
+                "fromBlock": hex(from_block),
+                "toBlock":   hex(to_block),
+                "address":   ContractAdapter.KEYPAYMENTS_V2_ADDRESS,
+                "topics":    [
+                    ContractAdapter.PURCHASED_EVENT_SIGNATURE,
+                    None,           # purchaseId — herhangi biri
+                    buyer_topic,    # buyer = bu cüzdan
+                ]
+            }]
+        }
+
+        try:
+            data = _rpc_post(ContractAdapter.SOMNIA_RPC_MAINNET, payload, timeout=15)
+            if data.get("error"):
+                logger.warning("eth_getLogs RPC error", context={"error": data["error"]})
+                return []
+
+            logs = data.get("result") or []
+            events = []
+            for log in logs:
+                topics = log.get("topics", [])
+                if len(topics) < 4:
+                    continue
+                try:
+                    product_id = int(topics[3], 16)
+                    key_type   = ContractAdapter.PRODUCT_NAME_MAP.get(product_id)
+                    if not key_type:
+                        continue
+                    raw_data   = log.get("data", "0x")[2:]
+                    paid_wei   = int(raw_data[0:64], 16) if len(raw_data) >= 64 else 0
+                    tx_hash    = log.get("transactionHash", "")
+                    block_num  = int(log.get("blockNumber", "0x0"), 16)
+                    purchase_id = int(topics[1], 16)
+                    events.append({
+                        "tx_hash":     tx_hash,
+                        "key_type":    key_type,
+                        "block_number": block_num,
+                        "paid_wei":    str(paid_wei),
+                        "purchase_id": purchase_id,
+                    })
+                except (ValueError, IndexError):
+                    continue
+            return events
+
+        except (OSError, urllib.error.URLError) as e:
+            logger.warning("fetch_purchased_logs_for_wallet RPC unreachable", context={"error": str(e)})
+            return []
 
     @staticmethod
     def get_expected_price(key_type):
@@ -594,14 +681,7 @@ class ContractAdapter:
                 "id": 1
             }
             
-            response = requests.post(
-                ContractAdapter.SOMNIA_RPC_MAINNET,
-                json=payload,
-                timeout=10
-            )
-            response.raise_for_status()
-            
-            data = response.json()
+            data = _rpc_post(ContractAdapter.SOMNIA_RPC_MAINNET, payload, timeout=10)
             if data.get("error"):
                 err = data.get("error") or {}
                 code = err.get("code", "unknown")
@@ -616,7 +696,7 @@ class ContractAdapter:
                 logger.debug("Transaction receipt not found (pending)", context={"tx_hash": tx_hash})
             return result  # None if pending, dict if found
             
-        except requests.exceptions.RequestException as e:
+        except (OSError, urllib.error.URLError) as e:
             logger.error("RPC unreachable for transaction receipt", error=e, context={"tx_hash": tx_hash, "rpc_endpoint": ContractAdapter.SOMNIA_RPC_MAINNET})
             raise ValueError(VerifyErrorCodes.RPC_UNREACHABLE)
     
@@ -637,14 +717,7 @@ class ContractAdapter:
                 "id": 1
             }
             
-            response = requests.post(
-                ContractAdapter.SOMNIA_RPC_MAINNET,
-                json=payload,
-                timeout=10
-            )
-            response.raise_for_status()
-            
-            data = response.json()
+            data = _rpc_post(ContractAdapter.SOMNIA_RPC_MAINNET, payload, timeout=10)
             if data.get("error"):
                 err = data.get("error") or {}
                 code = err.get("code", "unknown")
@@ -659,7 +732,7 @@ class ContractAdapter:
                 logger.warning("Transaction not found", context={"tx_hash": tx_hash})
             return result
             
-        except requests.exceptions.RequestException as e:
+        except (OSError, urllib.error.URLError) as e:
             logger.error("RPC unreachable for transaction", error=e, context={"tx_hash": tx_hash, "rpc_endpoint": ContractAdapter.SOMNIA_RPC_MAINNET})
             raise ValueError(VerifyErrorCodes.RPC_UNREACHABLE)
     

@@ -27,6 +27,14 @@ function.zip
 # AWS
 .aws/
 
+# Build artifacts
+lambda_package/
+
+# Admin / emergency utility scripts (local use only)
+restore_env_vars.py
+do_deploy.py
+check_health_logs.py
+
 # Installed packages (Lambda layers/dependencies)
 # These should NOT be in git - Lambda uses layers or zip deployment
 boto3/

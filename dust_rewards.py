@@ -21,7 +21,7 @@ class DustRewardsService:
     def __init__(self):
         self.dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
         self.dust_rewards_table = self.dynamodb.Table(config.TABLE_DUST_REWARDS)
-        self.player_resources_table = self.dynamodb.Table(config.TABLE_PLAYER_RESOURCES)
+        self.player_data_table = self.dynamodb.Table(config.TABLE_PLAYER_DATA)
     
     def check_reward(self, wallet_address: str) -> Tuple[bool, Optional[Dict], Optional[str]]:
         """
@@ -132,41 +132,16 @@ class DustRewardsService:
                     return False, None, "Reward already claimed"
                 raise
             
-            # Add dust to user's resource balance
+            # Add dust to user's hive_player_data.dust_count
             try:
-                # Get current DUST balance
-                response = self.player_resources_table.get_item(
-                    Key={
-                        "user_id": user_id,
-                        "resource_type": "DUST"
+                self.player_data_table.update_item(
+                    Key={"user_id": user_id},
+                    UpdateExpression="ADD dust_count :amount SET updated_at = :now",
+                    ExpressionAttributeValues={
+                        ":amount": Decimal(str(dust_amount)),
+                        ":now": now
                     }
                 )
-                
-                if "Item" in response:
-                    # Update existing balance
-                    current_balance = int(response["Item"].get("quantity", 0))
-                    new_balance = current_balance + dust_amount
-                    
-                    self.player_resources_table.update_item(
-                        Key={
-                            "user_id": user_id,
-                            "resource_type": "DUST"
-                        },
-                        UpdateExpression="SET quantity = :new_balance, updated_at = :now",
-                        ExpressionAttributeValues={
-                            ":new_balance": Decimal(str(new_balance)),
-                            ":now": now
-                        }
-                    )
-                else:
-                    # Create new DUST resource
-                    self.player_resources_table.put_item(Item={
-                        "user_id": user_id,
-                        "resource_type": "DUST",
-                        "quantity": Decimal(str(dust_amount)),
-                        "created_at": now,
-                        "updated_at": now
-                    })
                 
                 logger.info("Dust reward claimed successfully", context={
                     "wallet_address": wallet_address,
@@ -182,8 +157,8 @@ class DustRewardsService:
                 }, None
                 
             except Exception as resource_error:
-                # Rollback claim if resource update fails
-                logger.error("Failed to add dust to resources, rolling back", error=resource_error, context={
+                # Rollback claim if player_data update fails
+                logger.error("Failed to add dust to player_data, rolling back", error=resource_error, context={
                     "wallet_address": wallet_address,
                     "user_id": user_id
                 })

@@ -44,8 +44,13 @@ def lambda_handler(event, context):
         # Validate configuration on cold start
         if hasattr(lambda_handler, '_first_run'):
             errors = config.validate()
-            if errors and config.is_production():
-                logger.critical("Configuration errors", context={"errors": errors})
+            # Only block startup for CRITICAL errors; log WARNINGs but continue
+            critical_errors = [e for e in errors if e.startswith("CRITICAL:")]
+            warning_errors = [e for e in errors if not e.startswith("CRITICAL:")]
+            if warning_errors:
+                logger.warning("Configuration warnings", context={"warnings": warning_errors})
+            if critical_errors and config.is_production():
+                logger.critical("Configuration errors", context={"errors": critical_errors})
                 return inject_cors_headers(
                     APIResponse.server_error("Service misconfigured", origin=origin),
                     origin
@@ -1225,6 +1230,19 @@ SPECIAL_TASK_ACHIEVEMENTS = {
     'HIKill50Enemies', 'HIOpen1Chest', 'HISurvive3', 'HIOpen3Chest', 'ReachLevel5'
 }
 
+# Level threshold → (achievement_id, is_special_task)
+# Yeni level achievement eklenince buraya satır eklenmeli
+LEVEL_ACHIEVEMENT_MAP = [
+    (5, 'ReachLevel5', True),
+]
+
+# Chest count threshold → (achievement_id, is_special_task)
+# Yeni chest achievement eklenince buraya satır eklenmeli
+CHEST_ACHIEVEMENT_MAP = [
+    (1, 'HIOpen1Chest', True),
+    (3, 'HIOpen3Chest', True),
+]
+
 @require_auth()
 def handle_unlock_achievement(event, context, user_id):
     """Unlock an achievement"""
@@ -1584,6 +1602,7 @@ def handle_update_level(event, context, user_id):
         from models import update_level
         from validation import Validator
         import boto3, uuid
+        from decimal import Decimal
 
         body = parse_request_body(event)
         level = int(Validator.required(body, 'level'))
@@ -1601,6 +1620,36 @@ def handle_update_level(event, context, user_id):
             })
         except Exception as ev_err:
             logger.error("Failed to write level event", error=ev_err, user_id=user_id)
+
+        # Auto-grant level-based achievements if threshold is met and achievement is missing
+        try:
+            dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+            ach_table = dynamodb.Table(config.TABLE_ACHIEVEMENTS)
+            now = now_iso()
+            granted = []
+            for (min_lvl, ach_id, is_special) in LEVEL_ACHIEVEMENT_MAP:
+                if new_level >= min_lvl:
+                    existing = ach_table.get_item(
+                        Key={'user_id': user_id, 'achievement_id': ach_id}
+                    ).get('Item')
+                    if not existing:
+                        ach_table.update_item(
+                            Key={'user_id': user_id, 'achievement_id': ach_id},
+                            UpdateExpression='SET progress = :p, updated_at = :ts, is_special_task = :sp',
+                            ExpressionAttributeValues={
+                                ':p':  Decimal('100'),
+                                ':ts': now,
+                                ':sp': is_special
+                            }
+                        )
+                        granted.append(ach_id)
+                        logger.info("Auto-granted level achievement",
+                                    user_id=user_id,
+                                    achievement_id=ach_id,
+                                    level=new_level)
+        except Exception as ach_err:
+            # Achievement hatası level kaydını bozmaz
+            logger.error("Auto-grant level achievement error", error=ach_err, user_id=user_id)
 
         return APIResponse.success({'level': new_level}, origin=origin)
     except ValidationError as e:
@@ -1653,13 +1702,47 @@ def handle_save_player_data(event, context, user_id):
     try:
         from models import save_player_data
         body = parse_request_body(event)
+        chest_opened_value = body.get('chestOpened')
         result = save_player_data(
             user_id,
             dust=body.get('dust'),
             high_score=body.get('high_score'),
             gems=body.get('gems'),
-            chest_opened=body.get('chestOpened')
+            chest_opened=chest_opened_value
         )
+
+        # Auto-grant chest-based achievements if chestOpened was updated
+        if chest_opened_value is not None:
+            try:
+                import boto3
+                from decimal import Decimal
+                new_chest_count = int(chest_opened_value)
+                dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
+                ach_table = dynamodb.Table(config.TABLE_ACHIEVEMENTS)
+                now = now_iso()
+                for (min_count, ach_id, is_special) in CHEST_ACHIEVEMENT_MAP:
+                    if new_chest_count >= min_count:
+                        existing = ach_table.get_item(
+                            Key={'user_id': user_id, 'achievement_id': ach_id}
+                        ).get('Item')
+                        if not existing:
+                            ach_table.update_item(
+                                Key={'user_id': user_id, 'achievement_id': ach_id},
+                                UpdateExpression='SET progress = :p, updated_at = :ts, is_special_task = :sp',
+                                ExpressionAttributeValues={
+                                    ':p':  Decimal('100'),
+                                    ':ts': now,
+                                    ':sp': is_special
+                                }
+                            )
+                            logger.info('Auto-granted chest achievement',
+                                        user_id=user_id,
+                                        achievement_id=ach_id,
+                                        chest_opened=new_chest_count)
+            except Exception as ach_err:
+                # Achievement hatası save işlemini bozmaz
+                logger.error('Auto-grant chest achievement error', error=ach_err, user_id=user_id)
+
         return APIResponse.success(result, origin=origin)
     except Exception as e:
         logger.error("Save player data error", error=e, user_id=user_id)
@@ -2557,7 +2640,7 @@ def handle_key_purchase(event, context, user_id):
             return APIResponse.error("User not found", status_code=404, origin=origin)
         
         user_data = user_response['Item']
-        wallet_address = user_data.get('wallet_address', '').lower()
+        wallet_address = (user_data.get('wallet_address') or '').lower()
         
         # Ensure wallet is linked
         if not wallet_address:
@@ -2818,39 +2901,117 @@ def handle_key_replay(event, context):
 
 @require_auth()
 def handle_keys_owned(event, context, user_id):
-    """GET /keys/owned - Get player's owned keys"""
+    """GET /keys/owned - Get player's owned keys (with auto-heal for missed on-chain grants)"""
     from contract_adapter import ContractAdapter
-    from models import get_key_ownership
-    
+    from models import get_key_ownership, add_key_to_player
+    from decimal import Decimal
+    from datetime import datetime, timezone
+
     try:
         origin = get_origin(event)
-        
-        # Get user's wallet address
+
+        # ── Fetch user + wallet ────────────────────────────────────────────
         import boto3
         dynamodb = boto3.resource('dynamodb', region_name=config.AWS_REGION)
-        users_table = dynamodb.Table(config.TABLE_USERS)
+        users_table       = dynamodb.Table(config.TABLE_USERS)
+        player_data_table = dynamodb.Table('hive_player_data')
+
         user_response = users_table.get_item(Key={"user_id": user_id})
-        
         if 'Item' not in user_response:
             return APIResponse.error("User not found", status_code=404, origin=origin)
-        
-        user_data = user_response['Item']
-        wallet_address = user_data.get('wallet_address', '')
-        
-        # Get ownership from DB (mock contract check)
+
+        user_data      = user_response['Item']
+        wallet_address = (user_data.get('wallet_address') or '').lower()
+
+        # ── Auto-heal: scan on-chain for missed grants ────────────────────
+        auto_claimed = 0
+        heal_error   = None
+
+        if wallet_address and wallet_address.startswith('0x') and len(wallet_address) == 42:
+            try:
+                # Fetch player_data to get last scan block + tx_index
+                pd_resp    = player_data_table.get_item(
+                    Key={'user_id': user_id},
+                    ProjectionExpression='last_grant_scan_block, tx_index'
+                )
+                pd_item    = pd_resp.get('Item', {})
+                tx_index   = pd_item.get('tx_index', {})
+                last_scan  = int(pd_item.get('last_grant_scan_block', 0) or 0)
+
+                latest_block = ContractAdapter._get_latest_block()
+
+                # Only scan if enough new blocks have appeared (avoids RPC on every request)
+                if latest_block - last_scan >= ContractAdapter.AUTO_HEAL_MIN_GAP:
+                    from_block = max(last_scan + 1,
+                                     latest_block - ContractAdapter.AUTO_HEAL_SCAN_WINDOW)
+
+                    logs = ContractAdapter.fetch_purchased_logs_for_wallet(
+                        wallet_address, from_block, latest_block
+                    )
+
+                    for ev in logs:
+                        tx_hash = ev['tx_hash']
+                        if tx_hash in tx_index:
+                            continue  # already processed
+
+                        key_type = ev['key_type']
+                        purchase_event = {
+                            "tx_hash":      tx_hash,
+                            "key_type":     key_type,
+                            "somi_value":   str(Decimal(ev['paid_wei']) / Decimal(10**18)),
+                            "timestamp":    datetime.now(timezone.utc).isoformat(),
+                            "payment_system": "contract",
+                            "auto_heal":    True,
+                            "block_number": ev['block_number'],
+                        }
+                        try:
+                            add_key_to_player(user_id, key_type, purchase_event)
+                            auto_claimed += 1
+                            logger.info("[AutoHeal] Missed grant applied",
+                                        context={"user_id": user_id,
+                                                 "tx_hash": tx_hash,
+                                                 "key_type": key_type})
+                        except Exception as grant_err:
+                            # "already processed" → duplicate guard, skip silently
+                            if "already processed" not in str(grant_err):
+                                logger.warning("[AutoHeal] Grant error",
+                                               context={"tx_hash": tx_hash,
+                                                        "error": str(grant_err)})
+
+                    # Persist latest scanned block (fire-and-forget, best-effort)
+                    try:
+                        player_data_table.update_item(
+                            Key={'user_id': user_id},
+                            UpdateExpression='SET last_grant_scan_block = :b',
+                            ExpressionAttributeValues={':b': Decimal(str(latest_block))}
+                        )
+                    except Exception:
+                        pass  # non-critical
+
+            except Exception as heal_ex:
+                # Auto-heal failure must NOT break the main response
+                heal_error = str(heal_ex)
+                logger.warning("[AutoHeal] scan failed",
+                               context={"user_id": user_id, "error": heal_error})
+
+        # ── Return current balances (post-heal) ───────────────────────────
         keys_owned_data = get_key_ownership(user_id)
         ownership = ContractAdapter.get_owned_keys_mock(user_id, wallet_address, keys_owned_data)
-        
-        return APIResponse.success({
+
+        resp_body = {
             "wallet_address": wallet_address,
             "owned": {
                 "bronze": ownership["bronze"],
                 "silver": ownership["silver"],
-                "gold": ownership["gold"]
+                "gold":   ownership["gold"]
             },
             "source": ownership["source"]
-        }, origin=origin)
-        
+        }
+        if auto_claimed > 0:
+            resp_body["auto_claimed"] = auto_claimed
+
+        return APIResponse.success(resp_body, origin=origin)
+
     except Exception as e:
         logger.error(f"Keys owned error: {str(e)}", error=e, user_id=user_id)
         return APIResponse.server_error(origin=get_origin(event))

@@ -15,7 +15,8 @@ class EmailService:
     
     def __init__(self):
         self.ses = boto3.client('ses', region_name=config.AWS_REGION)
-        self.sender_email = config.SENDER_EMAIL or "info@pixcape.games"
+        base_email = config.SENDER_EMAIL or "info@pixcape.games"
+        self.sender_email = f"Hive Invasion <{base_email}>"
     
     def send_password_reset_email(self, to_email: str, reset_token: str, user_name: str = None) -> bool:
         """Send password reset email"""
@@ -237,6 +238,7 @@ Hive Invasion Team
             response = self.ses.send_email(
                 Source=self.sender_email,
                 Destination={'ToAddresses': [to_email]},
+                ConfigurationSetName='my-first-configuration-set',
                 Message={
                     'Subject': {
                         'Data': '🔐 Hive Invasion - Reset Your Password',
@@ -441,6 +443,7 @@ Hive Invasion Team
             response = self.ses.send_email(
                 Source=self.sender_email,
                 Destination={'ToAddresses': [to_email]},
+                ConfigurationSetName='my-first-configuration-set',
                 Message={
                     'Subject': {
                         'Data': f'Hive Invasion - Reset Code: {reset_code}',
@@ -696,6 +699,7 @@ Hive Invasion Team
             response = self.ses.send_email(
                 Source=self.sender_email,
                 Destination={'ToAddresses': [to_email]},
+                ConfigurationSetName='my-first-configuration-set',
                 Message={
                     'Subject': {
                         'Data': '✅ Hive Invasion - Verify Your Email',
@@ -897,9 +901,10 @@ Hive Invasion Team
             response = self.ses.send_email(
                 Source=self.sender_email,
                 Destination={'ToAddresses': [to_email]},
+                ConfigurationSetName='my-first-configuration-set',
                 Message={
                     'Subject': {
-                        'Data': f'Hive Invasion - Verification Code: {verification_code}',
+                        'Data': 'Hive Invasion - Complete Your Registration',
                         'Charset': 'UTF-8'
                     },
                     'Body': {
